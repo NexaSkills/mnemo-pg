@@ -1,36 +1,48 @@
-"""Provision a mnemo-pg schema (idempotent) and verify it.
+"""Provision a mnemo-pg schema natively (idempotent) and report shape counts.
 
 Usage:
-    python3 scripts/provision_schema.py <schema>            # provision + verify
-    python3 scripts/provision_schema.py --all               # every mnemosyne* schema present
+    python3 scripts/provision_schema.py <schema> [<schema> ...]
+    python3 scripts/provision_schema.py --all      # every mnemosyne* schema
 
-Layers (in order):
-  1. CREATE SCHEMA + catalog shims   (postgres._provision_probe — same code
-                                      the live connect path runs)
-  2. core tables                     (schema_ddl.DDL   — 24 tables)
-  3. indexes                         (schema_ddl.INDEXES)
-  4. pgvector companions             (vec_working / vec_episodes / vec_facts:
-                                      rowid BIGINT PK + vector(DIM) + HNSW)
-  5. FTS helpers + per-table tsvector triggers (fts_pg.ensure_fts over the
-                                      three core FTS shapes)
+Layers (in one advisory-locked transaction per schema):
+  1. CREATE SCHEMA + extensions (vector, pg_trgm)
+  2. declarative native DDL from scripts/native_ddl.py (no translation layer):
+     identity-rowid tables, tsvector columns + triggers + GIN, julianday
+     parity functions, vector companions with FK cascade + HNSW.
+  3. post-assert derived structures whose *bodies* may have changed since a
+     previous apply (CREATE TRIGGER IF NOT EXISTS / CREATE TABLE IF NOT EXISTS
+     keep data but would otherwise keep old trigger definitions): tsvector
+     triggers are DROPped and re-CREATEd from the same declarative source.
+
+Locking (lcm-pg lesson): pg_advisory_lock per schema BEFORE any DDL so
+concurrent provisioners serialize instead of racing IF-NOT-EXISTS.
+
+DSN: $MNEMO_PG_DSN, else $HERMES_HOME/.env, else the private lcm-pg cluster.
 """
+from __future__ import annotations
+
+import hashlib
 import os
-import re
-import sys
 import pathlib
+import re
+import subprocess
+import sys
+
+import psycopg
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(REPO))
+LOCK_NS = 7766001  # stable namespace for mnemo-pg schema locks
 
-# the three FTS5 shapes the vendored core declares (beam.py):
-#  - fts_working  standalone over working_memory.content
-#  - fts_episodes external-content over episodic_memory.content by rowid
-#  - fts_facts    external-content over facts.body
-FTS_TARGETS = (("working_memory", "content"),
-               ("episodic_memory", "content"),
-               ("facts", "object"))
-
-VEC_TABLES = ("working", "episodes", "facts")  # vec_working, vec_episodes, vec_facts
+# (trigger, table) pairs whose bodies come from native_ddl — re-asserted.
+TSVECTOR_TRIGGERS = (
+    ("working_memory_content_tsv_ts_ins", "working_memory"),
+    ("episodic_memory_content_tsv_ts_ins", "episodic_memory"),
+    ("episodic_memory_summary_tsv_ts_ins", "episodic_memory"),
+    ("facts_fact_tsv_ts_ins", "facts"),
+)
+FTS_TABLES = ("working_memory", "episodic_memory", "facts", "canonical_facts",
+              "triples", "media_understandings", "media_assets",
+              "memoria_persona", "memoria_claims", "memoria_preferences")
 
 
 def dsn() -> str:
@@ -43,119 +55,158 @@ def dsn() -> str:
         for line in p.read_text().splitlines():
             if line.startswith("MNEMO_PG_DSN="):
                 return line.split("=", 1)[1].strip()
-    # fleet default: the private lcm-pg cluster
     run = pathlib.Path.home() / "lcm-pg" / "run"
     if run.is_dir():
         return f"host={run} port=54329 dbname=lcm user=lcm01"
-    raise SystemExit("no MNEMO_PG_DSN")
+    raise SystemExit("no MNEMO_PG_DSN and no lcm-pg/run socket dir")
 
 
-def translate(sql: str) -> str:
-    """SQLite DDL text -> PG DDL text via the production translator."""
-    from mnemo_backends.postgres import _rewrite_text
-    return _rewrite_text(sql)
+def lock_key(schema: str) -> int:
+    h = hashlib.sha256(f"mnemo:{schema}".encode()).digest()
+    return int.from_bytes(h[:8], "big") & 0x7FFFFFFFFFFFFFFF
 
 
-def core_tables_present(cur):
-    cur.execute(
-        "SELECT c.relname FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace "
-        "WHERE n.nspname = current_schema() AND c.relkind='r'")
-    return {r[0] for r in cur.fetchall()}
+def ddl_for(schema: str) -> str:
+    out = subprocess.run(
+        [sys.executable, str(REPO / "scripts" / "native_ddl.py"), schema],
+        capture_output=True, text=True, check=True,
+    )
+    return out.stdout
 
 
-def vec_ddl(dim: int) -> list:
-    out = []
-    for t in VEC_TABLES:
-        out.append(
-            f'CREATE TABLE IF NOT EXISTS "vec_{t}" ('
-            f'rowid BIGINT PRIMARY KEY, embedding vector({int(dim)}))')
-        out.append(
-            f'CREATE INDEX IF NOT EXISTS "hnsw_vec_{t}" ON "vec_{t}" '
-            f"USING hnsw (embedding vector_cosine_ops)")
-    return out
+def _split_statements(script: str) -> list[str]:
+    """Split on ';' keeping dollar-quoted bodies and string literals intact."""
+    stmts: list[str] = []
+    buf: list[str] = []
+    i, in_dollar = 0, None
+    while i < len(script):
+        ch = script[i]
+        if in_dollar:
+            if script.startswith(in_dollar, i):
+                in_dollar = None
+            buf.append(ch)
+            i += 1
+            continue
+        if ch == "$":
+            m = re.match(r"\$[A-Za-z0-9_]*\$", script[i:])
+            if m:
+                in_dollar = m.group(0)
+                buf.append(m.group(0))
+                i += len(m.group(0))
+                continue
+        if ch == "'":
+            buf.append(ch)
+            i += 1
+            while i < len(script):
+                if script[i] == "'":
+                    buf.append("'")
+                    i += 1
+                    if i < len(script) and script[i] == "'":
+                        buf.append("'")
+                        i += 1
+                        continue
+                    break
+                buf.append(script[i])
+                i += 1
+            continue
+        if ch == "-" and script.startswith("--", i):
+            j = script.find("\n", i)
+            i = len(script) if j < 0 else j
+            continue
+        if ch == ";":
+            s = "".join(buf).strip()
+            if s:
+                stmts.append(s)
+            buf = []
+            i += 1
+            continue
+        buf.append(ch)
+        i += 1
+    s = "".join(buf).strip()
+    if s:
+        stmts.append(s)
+    return stmts
 
 
-def table_names():
-    return [re.search(r'CREATE TABLE(?: IF NOT EXISTS)? "?([a-zA-Z_0-9]+)', d).group(1)
-            for d in __import__("mnemo_backends.schema_ddl", fromlist=["DDL"]).DDL]
-
-
-def provision(schema: str, dim: int = 384, verbose: bool = True) -> dict:
-    import psycopg
-    from mnemo_backends import schema_ddl, postgres
-    from mnemo_backends import fts_pg
-
-    if not re.fullmatch(r"[a-z][a-z0-9_]*", schema):
+def provision(conn, schema: str) -> dict:
+    if not re.fullmatch(r"[a-z][a-z0-9_]{0,62}", schema):
         raise SystemExit(f"unsafe schema name: {schema}")
+    with conn.cursor() as cur:
+        cur.execute("SELECT pg_advisory_lock(%s)", (lock_key(schema),))
+        try:
+            script = ddl_for(schema)
+            try:
+                with conn.transaction():
+                    for stmt in _split_statements(script):
+                        cur.execute(stmt)
+            except psycopg.Error:
+                # splitter miss: PG script mode handles any valid script
+                cur.execute(script)
+            # re-assert FTS trigger bodies from the same declarative source
+            for trg, table in TSVECTOR_TRIGGERS:
+                cur.execute(
+                    'DROP TRIGGER IF EXISTS "%s" ON "%s"."%s"' % (trg, schema, table))
+            for stmt in _split_statements(script):
+                if stmt.lstrip().upper().startswith("CREATE TRIGGER"):
+                    cur.execute(stmt)
+
+            tables = cur.execute(
+                "SELECT count(*) FROM information_schema.tables "
+                "WHERE table_schema=%s", (schema,)).fetchone()[0]
+            idx = cur.execute(
+                "SELECT count(*) FROM pg_indexes WHERE schemaname=%s",
+                (schema,)).fetchone()[0]
+            trig = cur.execute(
+                "SELECT count(DISTINCT t.tgname) FROM pg_trigger t "
+                "JOIN pg_class c ON c.oid=t.tgrelid "
+                "JOIN pg_namespace n ON n.oid=c.relnamespace "
+                "WHERE n.nspname=%s AND NOT t.tgisinternal", (schema,)).fetchone()[0]
+            vecs = cur.execute(
+                "SELECT count(*) FROM information_schema.columns "
+                "WHERE table_schema=%s AND udt_name='vector'", (schema,)).fetchone()[0]
+            gin = cur.execute(
+                "SELECT count(*) FROM pg_indexes WHERE schemaname=%s "
+                "AND indexdef ILIKE '%%gin%%'", (schema,)).fetchone()[0]
+            hnsw = cur.execute(
+                "SELECT count(*) FROM pg_indexes WHERE schemaname=%s "
+                "AND indexdef ILIKE '%%hnsw%%'", (schema,)).fetchone()[0]
+            fts_cols = cur.execute(
+                "SELECT count(*) FROM information_schema.columns "
+                "WHERE table_schema=%s AND udt_name='tsvector'", (schema,)).fetchone()[0]
+            identity = cur.execute(
+                "SELECT count(*) FROM pg_attribute a JOIN pg_class c "
+                "ON c.oid=a.attrelid JOIN pg_namespace n ON n.oid=c.relnamespace "
+                "WHERE n.nspname=%s AND a.attidentity IN ('a','d') "
+                "AND a.attnum>0", (schema,)).fetchone()[0]
+            return {"schema": schema, "tables": tables, "indexes": idx,
+                    "triggers": trig, "vector_cols": vecs, "gin": gin,
+                    "hnsw": hnsw, "tsvector_cols": fts_cols,
+                    "identity_cols": identity}
+        finally:
+            cur.execute("SELECT pg_advisory_unlock(%s)", (lock_key(schema),))
+
+
+def main(argv: list[str]) -> int:
+    if not argv:
+        raise SystemExit(__doc__)
+    if argv == ["--all"]:
+        conn = psycopg.connect(dsn(), autocommit=True)
+        argv = [r[0] for r in conn.execute(
+            "SELECT schema_name FROM information_schema.schemata "
+            "WHERE schema_name LIKE 'mnemosyne%' ORDER BY 1")]
+        conn.close()
     conn = psycopg.connect(dsn(), autocommit=True)
     try:
-        cur = conn.cursor()
-        cur.execute(f'CREATE SCHEMA IF NOT EXISTS "{schema}"')
-        cur.execute(f'SET search_path = "{schema}", public')
-        postgres._ensure_catalog_shims(cur, schema)
-
-        have = core_tables_present(cur)
-        made = 0
-        for ddl in schema_ddl.DDL:
-            m = re.search(r'CREATE TABLE(?: IF NOT EXISTS)? "?([a-zA-Z_0-9]+)', ddl)
-            if not m:
-                raise RuntimeError(f"unparseable DDL entry: {ddl[:80]}")
-            if m.group(1) in have:
-                continue
-            cur.execute(translate(ddl))
-            made += 1
-
-        idx = 0
-        for i in schema_ddl.INDEXES:
-            try:
-                cur.execute(translate(i))
-                idx += 1
-            except Exception as e:
-                print(f"  index skip: {str(e).splitlines()[0][:120]}")
-
-        for v in vec_ddl(dim):
-            cur.execute(v)
-
-        fts_pg.ensure_helper(conn)
-        fts = 0
-        for table, col in FTS_TARGETS:
-            try:
-                fts_pg.ensure_fts(conn, table, col)
-                fts += 1
-            except Exception as e:
-                print(f"  fts skip {table}.{col}: {str(e).splitlines()[0][:120]}")
-
-        have = core_tables_present(cur)
-        missing = [t for t in table_names() if t not in have]
-        if verbose:
-            print(f"schema {schema}: +{made} new tables ({len(schema_ddl.DDL)} total, "
-                  f"{idx} index stmts, {fts}/{len(FTS_TARGETS)} fts, "
-                  f"{len(VEC_TABLES)} vec companions)")
-        if missing:
-            raise SystemExit(f"MISSING TABLES: {missing}")
-        return {"tables": len(schema_ddl.DDL), "made": made, "indexes": idx, "fts": fts}
+        for schema in argv:
+            info = provision(conn, schema)
+            print("provisioned {schema}: {tables} tables, {indexes} indexes, "
+                  "{triggers} triggers, {tsvector_cols} tsvector cols ({gin} GIN), "
+                  "{vector_cols} vector cols ({hnsw} HNSW), {identity_cols} identity"
+                  .format(**info))
     finally:
         conn.close()
-
-
-def main():
-    args = sys.argv[1:]
-    if not args:
-        raise SystemExit(__doc__)
-    dim = int(os.environ.get("MNEMOSYNE_EMBEDDING_DIM", "384"))
-    if args == ["--all"]:
-        import psycopg
-        conn = psycopg.connect(dsn(), autocommit=True)
-        rows = conn.execute(
-            "SELECT schema_name FROM information_schema.schemata "
-            "WHERE schema_name LIKE 'mnemosyne%' ORDER BY 1").fetchall()
-        conn.close()
-        schemas = [r[0] for r in rows]
-    else:
-        schemas = args
-    for s in schemas:
-        provision(s, dim=dim)
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main(sys.argv[1:]))

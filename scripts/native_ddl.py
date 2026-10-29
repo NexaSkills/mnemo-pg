@@ -22,6 +22,7 @@ Usage: native_ddl.py <schema-name> [--drop]
 from __future__ import annotations
 
 import argparse
+import re
 import sys
 
 TSVECTOR_COLS = {
@@ -423,6 +424,27 @@ FOR EACH ROW EXECUTE FUNCTION {schema}.{fn}();""")
     a("")
     a("-- vec_* population is derived data: rebuilt by the sync/rebuild scripts "
       "from memory_embeddings, never dumped.")
+    a("")
+
+    # Date parity functions: SQLite julianday/strftime equivalents used by the
+    # native backend's temporal queries (mnemo_backends/postgres_native.py).
+    a("""CREATE OR REPLACE FUNCTION {schema}.julianday_parity(t text) RETURNS double precision AS $$
+  SELECT CASE
+    WHEN t IS NULL OR btrim(t) = '' THEN NULL
+    WHEN t ~ '^[0-9]+(\\.[0-9]+)?$' THEN t::double precision
+    ELSE extract(epoch FROM t::timestamptz) / 86400.0 + 2440587.5
+  END
+$$ LANGUAGE sql IMMUTABLE;""".replace("{schema}", schema))
+    a("""CREATE OR REPLACE FUNCTION {schema}.strftime_parity(fmt text, t timestamptz) RETURNS text AS $$
+  SELECT CASE
+    WHEN t IS NULL THEN NULL
+    WHEN fmt = '%Y-%m-%d' THEN to_char(t, 'YYYY-MM-DD')
+    WHEN fmt = '%Y-%m' THEN to_char(t, 'YYYY-MM')
+    WHEN fmt = '%Y' THEN to_char(t, 'YYYY')
+    WHEN fmt = '%H:%M:%S' THEN to_char(t, 'HH24:MI:SS')
+    ELSE to_char(t, replace(replace(replace(fmt, '%Y', 'YYYY'), '%m', 'MM'), '%d', 'DD'))
+  END
+$$ LANGUAGE sql IMMUTABLE;""".replace("{schema}", schema))
     return "\n".join(out) + "\n"
 
 
@@ -430,7 +452,7 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("schema", help="schema name, e.g. mnemosyne_mike")
     args = ap.parse_args()
-    if not args.schema.replace("_", "").isalnum() or not args.schema.startswith("mnemosyne"):
+    if not re.fullmatch(r"[a-z][a-z0-9_]{0,62}", args.schema):
         print(f"refusing unusual schema name: {args.schema!r}", file=sys.stderr)
         return 2
     print(render(args.schema))
