@@ -39,9 +39,12 @@ def main():
             print(f"{name:<12} OK   (link->loader; no sqlite bank on disk)")
             continue
         mark = f"LIVEOK{int(time.time())}"
-        mt0 = db.stat().st_mtime_ns
+        if db.exists():
+            db.unlink()  # retirement contract: fresh process must not revive SQLite
+        mt0 = db.stat().st_mtime_ns if db.exists() else 0
         code = f"""
 import sys, os
+sys.path.insert(0, {str(REPO / 'vendor')!r})   # shadow site-packages (gateway startup parity)
 sys.path.insert(0, {str(link)!r})          # plugin dir itself == what Hermes imports
 sys.path.insert(0, {str(REPO)!r})
 import os as _o
@@ -66,7 +69,7 @@ print("WROTE")
                      ("live route marker LIVEOK%",))
         conn.commit()
         conn.close()
-        mt1 = db.stat().st_mtime_ns
+        mt1 = db.stat().st_mtime_ns if db.exists() else 0
         ok = n == 1 and mt0 == mt1
         if not ok:
             fails += 1

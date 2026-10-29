@@ -492,6 +492,17 @@ $$ LANGUAGE sql IMMUTABLE;""".replace("{schema}", schema))
   END
 $$ LANGUAGE sql IMMUTABLE;""".replace("{schema}", schema))
 
+    # SQLite's 2-arg scalar MAX(a,b): PG only has the aggregate, so the
+    # core's `SET importance = MAX(importance, ?)` style updates fail.
+    a("""CREATE OR REPLACE FUNCTION {schema}.max(a double precision, b double precision) RETURNS double precision AS $$
+  SELECT CASE
+    WHEN a IS NULL THEN coalesce(b, a)
+    WHEN b IS NULL THEN a
+    WHEN a >= b THEN a
+    ELSE b
+  END
+$$ LANGUAGE sql IMMUTABLE;""".replace("{schema}", schema))
+
     # FTS query normalizer: FTS5-style query text -> tsquery lexeme text.
     # Same contract the shim's helper had, defined in native schema space.
     # NOTE: backslashes here are REAL (single-quoted SQL literals inside a
@@ -517,6 +528,7 @@ BEGIN
     s := replace(s, '"', ' ');                             -- phrase -> words
     s := regexp_replace(s, '\m[a-z]+\s*/\s*[0-9]+\y', ' zz1zz ', 'g'); -- NEAR/n
     s := regexp_replace(s, '([0-9a-z_]+)\*', '\1:zz4zz', 'g');         -- prefix flag
+    s := replace(s, '*', '');                              -- stray prefix stars
     s := regexp_replace(s, '[^0-9a-z_:]+', ' ', 'g');      -- lexemes + markers
     s := regexp_replace(s, '\s+', ' ', 'g');
     s := btrim(s);

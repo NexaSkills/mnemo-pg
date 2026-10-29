@@ -1,9 +1,0 @@
-[Unit]
-Description=mnemo-pg SQLite resurrection tripwire
-After=local-fs.target
-
-[Service]
-Type=oneshot
-# REPO is materialized by mnemo_update.sh; fall back to the dev checkout.
-Environment=REPO=%h/plugins/mnemo-pg
-ExecStart=/bin/sh -c "python3 ${REPO}/scripts/retire_check.py || python3 ${HOME}/workspace/mnemo-pg/repo/scripts/retire_check.py"

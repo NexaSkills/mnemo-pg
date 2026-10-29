@@ -108,11 +108,11 @@ _BOOT_ERROR = None
 
 try:
     _bootstrap()
-    from mnemo_backends import vendor_bind  # noqa: F401  (binds on import)
-    vendor_bind.bind_vendor()  # ensure stdlib hook is live
+    from mnemo_backends import binding  # native PG route (no translation layer)
+    binding.bind()  # install hook BEFORE any mnemosyne module imports
     import hermes_memory_provider as _upstream
-    import mnemosyne  # noqa: F401  (force core import for per-module swap)
-    vendor_bind.bind_vendor()  # second pass over the now-loaded core modules
+    import mnemosyne  # noqa: F401  (all submodules exec through the hook)
+    binding.bind()  # sweep anything importable outside the hook's scope
 
     _boot = _upstream
 except Exception as exc:  # pragma: no cover
