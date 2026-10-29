@@ -4,6 +4,12 @@
 For every profile with a live SQLite bank on disk: write a marker through the
 plugin path (mnemo_backends.install + engine), prove it landed in the profile's
 PG schema AND that the SQLite file was not touched (mtime unchanged).
+
+Note: banks/<name> sub-bank DBs are deliberately EXCLUDED — they are
+consolidation-internal stores owned by the engine (sleep/consolidation), not
+per-agent provider banks; the fleet provider path only ever opens the per-home
+data/mnemosyne.db (schema mnemosyne_<profile>). Retirement archives the whole
+tree, so nothing is lost by not gating those paths.
 """
 import os, pathlib, subprocess, sys, time
 
@@ -26,7 +32,8 @@ def main():
         if not db.exists():
             print(f"{name:<12} SKIP (no sqlite bank)")
             continue
-        mark = f"RETREGATE{name.upper()}{int(time.time())}"
+        mark = f"RETREGATE{name.upper()}{int(time.time())}"  # cleanup after gate:
+        #   DELETE FROM working_memory WHERE content LIKE 'retirement gate marker RETREGATE%'
         mt0 = db.stat().st_mtime_ns
         code = f"""
 import os
@@ -45,7 +52,7 @@ print("WROTE")
         conn = psycopg.connect(host=str(SOCK), port=54329, dbname="lcm", user="lcm01",
                                options=f"-c search_path={schema},public")
         n = conn.execute("SELECT count(*) FROM working_memory WHERE content LIKE %s",
-                        (f"%{mark}%",)).fetchone()[0]
+                         (f"%{mark}%",)).fetchone()[0]
         conn.close()
         mt1 = db.stat().st_mtime_ns
         ok = n == 1 and mt0 == mt1
@@ -55,6 +62,18 @@ print("WROTE")
               f"sqlite_touched={mt0 != mt1} write_rc={r.returncode}")
         if r.returncode != 0:
             print("   stderr tail:", (r.stderr or "").strip().splitlines()[-1:] or "")
+    # clean up gate markers from all schemas
+    import psycopg
+    for name, home in profiles():
+        schema = "mnemosyne_default" if name == "default" else f"mnemosyne_{name}"
+        try:
+            c = psycopg.connect(host=str(SOCK), port=54329, dbname="lcm", user="lcm01",
+                                options=f"-c search_path={schema},public")
+            d = c.execute("DELETE FROM working_memory WHERE content LIKE %s",
+                         ("retirement gate marker RETREGATE%",)).fetchall()
+            c.commit(); c.close()
+        except Exception:
+            pass
     print("GATE:", "PASS" if fails == 0 else f"FAIL ({fails})")
     return 1 if fails else 0
 
