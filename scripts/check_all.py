@@ -69,7 +69,8 @@ def main() -> int:
     # 2. schema inventory for this host's profiles
     hermes = pathlib.Path.home() / ".hermes"
     profiles = ["default"] + sorted(
-        p.name for p in (hermes / "profiles").glob("*") if p.is_dir())
+        p.name for p in (hermes / "profiles").glob("*")
+        if p.is_dir() and not p.name.startswith("."))  # .deleted etc. excluded
     want = {"mnemosyne_" + p.lower().replace("-", "_") for p in profiles}
     want.add("mnemosyne_shared")
     schemas = set()
@@ -152,6 +153,16 @@ def main() -> int:
             add("WARN", "config", f"{envf}: missing {missing}")
         else:
             add("PASS", "config", f"{envf}: backend pin present")
+
+    # 7. sqlite retirement tripwire (live mnemosyne*.db files = resurrection)
+    trip = REPO / "scripts" / "retire_check.py"
+    if not trip.is_file():
+        add("WARN", "retired", "scripts/retire_check.py absent")
+    else:
+        r2 = subprocess.run([sys.executable, str(trip)], capture_output=True, text=True)
+        head = (r2.stdout or r2.stderr).strip().splitlines()[:1]
+        add("PASS" if r2.returncode == 0 else "FAIL", "retired",
+            " | ".join(head) or f"retire_check rc={r2.returncode}")
 
     fails = [r for r in rows if r[0] == "FAIL"]
     warns = [r for r in rows if r[0] == "WARN"]

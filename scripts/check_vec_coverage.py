@@ -8,7 +8,7 @@ import os, sys, psycopg
 
 PAIRS = (
     ("working_memory", "vec_working", "id", "working_memory__rowid"),
-    ("episodic_memory", "vec_episodes", "id", "rowid"),
+    ("episodic_memory", "vec_episodes", "id", "episodic_memory__rowid"),
     ("facts", "vec_facts", "fact_id", "facts__rowid"),
 )
 

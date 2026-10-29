@@ -15,7 +15,7 @@ def dsn():
                 user=os.environ.get("MNEMO_PG_USER", "lcm01"))
 
 TABLES = {
-    "episodic_memory": ("vec_episodes", "id", "content", "rowid"),
+    "episodic_memory": ("vec_episodes", "id", "content", "episodic_memory__rowid"),
     "facts": ("vec_facts", "fact_id",
               "subject || ' ' || predicate || ' ' || object", "facts__rowid"),
 }
