@@ -63,6 +63,24 @@ else
 fi
 log "pinned ref: $REF -> $COMMIT"
 
+
+# materialize_dir <target-dir> — replace a plugin DIRECTORY's CONTENTS with the
+# repo's plugin/ loader IN PLACE (path preserved; a symlink named mnemosyne is
+# NOT accepted by the plugin machinery as the catalog directory on all hosts).
+materialize_dir(){
+  local tgt="$1"
+  if [[ -L "$tgt" || ! -e "$tgt" ]]; then
+    run rm -f "$tgt"
+    run ln -sfn "$PLUGIN_DIR/plugin" "$tgt"   # link case still fine for fresh dirs
+    return 0
+  fi
+  # real directory: stamp loader files into it (idempotent copies)
+  run cp -f "$PLUGIN_DIR/plugin/__init__.py" "$tgt/__init__.py"
+  run cp -f "$PLUGIN_DIR/plugin/plugin.yaml" "$tgt/plugin.yaml" 2>/dev/null || true
+  run bash -c "echo 'MNEOLOADER=1' > '$tgt/.mnemo-pg-marker'"
+  SOURCES+=("dir-materialized: $tgt")
+}
+
 # ---------------------------------------------------------- 2. MATERIALIZE
 [[ -e "$PLUGIN_DIR" && ! -d "$PLUGIN_DIR" ]] && die "$PLUGIN_DIR exists and is not a dir (retire any symlink first)"
 if [[ "$SRC" != "$PLUGIN_DIR" ]]; then
@@ -81,15 +99,11 @@ log "deployed code at $COMMIT in $PLUGIN_DIR"
   { log "root plugins/mnemosyne is a real dir (old install); retiring to $HERMES/backups/"; \
     mkdir -p "$HERMES/backups"; run mv "$HERMES/plugins/mnemosyne" "$HERMES/backups/mnemosyne-dir-retired-$(date +%Y%m%d-%H%M%S)"; }
 [[ -e "$HERMES/plugins/mnemosyne" && ! -L "$HERMES/plugins/mnemosyne" ]] && die "cannot retire root plugins/mnemosyne"
-run ln -sfn "$PLUGIN_DIR/plugin" "$HERMES/plugins/mnemosyne"
-SOURCES+=("root: plugins/mnemosyne -> plugin loader")
+materialize_dir "$HERMES/plugins/mnemosyne"
 for d in "$HERMES"/profiles/*/; do
   p=$(basename "$d"); [[ -d "$d" ]] || continue
   mkdir -p "$d/plugins"
-  [[ -e "$d/plugins/mnemosyne" && ! -L "$d/plugins/mnemosyne" ]] && \
-    run mv "$d/plugins/mnemosyne" "$HERMES/backups/$p-mnemosyne-dir-retired-$(date +%Y%m%d-%H%M%S)"
-  run ln -sfn "$PLUGIN_DIR/plugin" "$d/plugins/mnemosyne"
-  SOURCES+=("profile:$p: plugins/mnemosyne -> plugin loader")
+  materialize_dir "$d/plugins/mnemosyne"
 done
 
 # ------------------------------------------------------------- 3. PARAMS
