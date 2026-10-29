@@ -84,6 +84,7 @@ materialize_dir(){
 # ---------------------------------------------------------- 2. MATERIALIZE
 [[ -e "$PLUGIN_DIR" && ! -d "$PLUGIN_DIR" ]] && die "$PLUGIN_DIR exists and is not a dir (retire any symlink first)"
 if [[ "$SRC" != "$PLUGIN_DIR" ]]; then
+  run mkdir -p "$PLUGIN_DIR"
   run git -C "$PLUGIN_DIR" init -q 2>/dev/null || true
   [[ -d "$PLUGIN_DIR/.git" ]] || run git -C "$PLUGIN_DIR" remote add origin "$REMOTE" 2>/dev/null || true
   run git -C "$PLUGIN_DIR" fetch -q "$SRC" "$COMMIT"
