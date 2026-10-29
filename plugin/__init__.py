@@ -52,12 +52,45 @@ def _shadow_site_packages() -> None:
     sys.path.insert(0, v)
 
 
+def _append_psycopg_site() -> None:
+    """Make psycopg importable under the Hermes launcher's `-I` mode.
+
+    Mirrors the lcm-pg loader: the packaged `hermes` CLI runs CPython in
+    isolated mode and strips PYTHONPATH, so the self-contained lcm-pg venv
+    (psycopg + psycopg_binary) is invisible. APPEND (never prepend) that
+    site-packages when the PG backend is active and psycopg is missing; the
+    host interpreter's own packages still win, so no ABI surprise.
+    """
+    try:
+        from mnemo_backends import factory
+        if factory.backend_for() != "postgres":
+            return
+    except Exception:
+        return
+    try:
+        import psycopg  # noqa: F401
+        return
+    except Exception:
+        pass
+    for cand in (os.environ.get("MNEMO_PG_VENV_SITE"),
+                 os.path.expanduser("~/lcm-pg/venv/lib/python3.12/site-packages"),
+                 os.path.expanduser("~/lcm-pg/venv/lib/python3.14/site-packages")):
+        if cand and cand not in sys.path and os.path.isdir(cand):
+            sys.path.append(cand)
+            try:
+                import psycopg  # noqa: F401
+                return
+            except Exception:
+                continue
+
+
 def _bootstrap() -> None:
     repo = _HERE.parent if (_HERE.parent / "mnemo_backends").is_dir() else _HERE
     for p in (str(repo), str(_vendor_dir())):
         if p not in sys.path:
             sys.path.insert(0, p)
     _shadow_site_packages()
+    _append_psycopg_site()
 
 
 _boot = None

@@ -49,11 +49,9 @@ _MNEMO_PLACEHOLDER_CACHE: dict = {}
 
 
 def _current_schema_name():
-    import os
     try:
-        from . import postgres as _pg
-        return _pg.schema_for_profile(os.environ.get("HERMES_HOME"),
-                                       os.environ.get("MNEMO_PG_SCHEMA"))
+        from . import factory as _f
+        return _f.schema_for_profile(os.environ.get("HERMES_HOME"))
     except Exception:
         return None
 
