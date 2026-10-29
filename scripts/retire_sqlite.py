@@ -14,6 +14,8 @@ import argparse, datetime, os, pathlib, shutil, subprocess, sys
 
 HERMES = pathlib.Path.home() / ".hermes"
 UNITS = pathlib.Path.home() / ".config/systemd/user"
+if os.environ.get("MNEMO_TRIPWIRE_UNITS"):
+    UNITS = pathlib.Path(os.environ["MNEMO_TRIPWIRE_UNITS"])
 
 def find_live():
     out = []
