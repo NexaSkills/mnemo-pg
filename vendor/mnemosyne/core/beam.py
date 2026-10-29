@@ -4694,9 +4694,7 @@ def _vec_search_with_blobs(
     k = int(k)
     try:
         if vec_type == "int8":
-            q_blob = conn.execute(
-                'SELECT vec_quantize_int8(?, "unit")', (emb_json,)
-            ).fetchone()[0]
+            q_blob = None  # pgvector arm stores fp32; quantizer is a no-op
             rows = conn.execute(
                 f'SELECT rowid, distance, embedding FROM vec_episodes '
                 f'WHERE embedding MATCH vec_quantize_int8(?, "unit") AND k={k} '
@@ -4705,12 +4703,10 @@ def _vec_search_with_blobs(
             ).fetchall()
             return (
                 [{"rowid": r[0], "distance": r[1], "blob": r[2]} for r in rows],
-                bytes(q_blob),
+                None,  # pgvector arm stores fp32; no quantized query blob
             )
         if vec_type == "bit":
-            q_blob = conn.execute(
-                "SELECT vec_quantize_binary(?)", (emb_json,)
-            ).fetchone()[0]
+            q_blob = None  # pgvector arm stores fp32; quantizer is a no-op
             rows = conn.execute(
                 f"SELECT rowid, distance, embedding FROM vec_episodes "
                 f"WHERE embedding MATCH vec_quantize_binary(?) AND k={k} "
@@ -4719,7 +4715,7 @@ def _vec_search_with_blobs(
             ).fetchall()
             return (
                 [{"rowid": r[0], "distance": r[1], "blob": r[2]} for r in rows],
-                bytes(q_blob),
+                None,  # pgvector arm stores fp32; no quantized query blob
             )
         # float32 arm: query passes through unquantized
         rows = conn.execute(
@@ -4741,6 +4737,25 @@ def _vec_search_with_blobs(
         try:
             return _vec_search(conn, embedding, k=k), None
         except sqlite3.Error:
+            logger.warning(
+                "vec fallback search also failed; no vector candidates",
+                exc_info=True,
+            )
+            return [], None
+    except TypeError:
+        # PG shim surface: the sqlite3.Error family is replaced by psycopg
+        # exceptions translated at the boundary, and a shim-internal
+        # TypeError must not escape the documented abstain-on-failure
+        # contract (callers score by the distance arm instead).
+        logger.warning(
+            "blob-bearing vec search raised TypeError (%s arm); falling "
+            "back to the distance-only search",
+            vec_type,
+            exc_info=True,
+        )
+        try:
+            return _vec_search(conn, embedding, k=k), None
+        except Exception:
             logger.warning(
                 "vec fallback search also failed; no vector candidates",
                 exc_info=True,

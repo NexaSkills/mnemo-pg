@@ -1643,6 +1643,13 @@ class _Cursor:
         # (literal % inside quoted strings is already doubled to %% by
         # _rewrite_text._double_literal_percents, so psycopg's placeholder
         # scanner never explodes on LIKE patterns.)
+        _trace = os.environ.get("MNEMO_PG_TRACE_SQL") or ""
+        if _trace:
+            try:
+                with open(_trace, "a") as _fh:
+                    _fh.write(repr((sql, params)) + "\n")
+            except Exception:
+                pass
         try:
             self._raw.execute(sql, params)
         except Exception:

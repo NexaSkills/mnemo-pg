@@ -37,11 +37,27 @@ def _vendor_dir() -> Path:
     raise FileNotFoundError("mnemo-pg: no vendor/ dir found near the plugin")
 
 
+def _shadow_site_packages() -> None:
+    """Put the vendored core AHEAD of site-packages on sys.path.
+
+    The upstream `mnemosyne` package is also pip-installed into the Hermes
+    venv. If site-packages resolves first, the runtime core is the pip copy
+    and every vendored patch (e.g. the pgvector blob-search arm in
+    core/beam.py) is silently bypassed — the shim still routes SQL, but
+    core-side fixes never apply. Insert vendor/ at position 0 explicitly.
+    """
+    v = str(_vendor_dir())
+    while v in sys.path:
+        sys.path.remove(v)
+    sys.path.insert(0, v)
+
+
 def _bootstrap() -> None:
     repo = _HERE.parent if (_HERE.parent / "mnemo_backends").is_dir() else _HERE
     for p in (str(repo), str(_vendor_dir())):
         if p not in sys.path:
             sys.path.insert(0, p)
+    _shadow_site_packages()
 
 
 _boot = None

@@ -142,6 +142,22 @@ def ensure_query_fn(conn) -> None:
         "LANGUAGE sql IMMUTABLE PARALLEL SAFE AS $$ "
         "SELECT q $$"
     )
+    ensure_vec_fn(conn)
+
+
+@_retry_serialization('ensure_vec_fn')
+def ensure_vec_fn(conn) -> None:
+    """Create mnemo_vec_tsq(q text) -> vector (idempotent).
+
+    The FTS binder bakes COPY sentinels as `mnemo_tsq('<literal>')`. For a
+    vec0 KNN statement the baked value is the embedding JSON, not tsquery
+    text, so vector_rewrite retargets the bake to this function: a direct
+    text::vector cast (no tsquery lexizing)."""
+    conn.execute(
+        "CREATE OR REPLACE FUNCTION mnemo_vec_tsq(q text) RETURNS vector "
+        "LANGUAGE sql IMMUTABLE PARALLEL SAFE AS $$ "
+        "SELECT q::vector $$"
+    )
 
 
 def _pk_column(conn, table: str) -> str:

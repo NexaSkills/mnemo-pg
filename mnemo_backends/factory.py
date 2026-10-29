@@ -13,6 +13,7 @@ executemany, cursor, commit, row_factory assignment).
 from __future__ import annotations
 
 import os
+import re
 import sqlite3  # noqa: F401  (sqlite path falls through to it in callers)
 from pathlib import Path
 
@@ -198,6 +199,14 @@ def _ensure_fts_tables(base) -> tuple:
     return tuple(out)
 
 
+def _qident(schema: str) -> str:
+    """Safe quoted schema identifier (alnum/underscore only)."""
+    s = str(schema)
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", s):
+        raise ValueError(f"unsafe schema identifier: {s!r}")
+    return '"' + s + '"'
+
+
 def _ensure_date_fns(base) -> None:
     """SQLite julianday()/strftime()/datetime()/date()/time() parity
     functions (temporal-validity predicates in the core). Definitions live
@@ -231,6 +240,36 @@ def _ensure_date_fns(base) -> None:
                     base.rollback()
                 except Exception:
                     pass
+        # Self-heal a stale schema-local date(text) from an older boot: if
+        # its body delegates to a schema-qualified to_timestamp that does
+        # not exist in this schema (PG keeps it in pg_catalog), rewrite the
+        # body to delegate to <schema>.datetime instead. CREATE OR REPLACE
+        # with the canonical DDL would not help — the body is a literal
+        # string that only provisions at creation time.
+        try:
+            bad = base.execute(
+                "SELECT p.oid FROM pg_proc p "
+                "JOIN pg_namespace n ON n.oid=p.pronamespace "
+                "WHERE n.nspname=current_schema() AND p.proname='date' "
+                "AND p.pronargs=1 AND pg_get_function_arguments(p.oid) "
+                "ILIKE '%text%' "
+                "AND prosrc LIKE '%to_timestamp%' "
+                "AND prosrc NOT LIKE '%pg_catalog%' "
+                "AND NOT EXISTS (SELECT 1 FROM pg_proc q "
+                "  JOIN pg_namespace m ON m.oid=q.pronamespace "
+                "  WHERE m.nspname=current_schema() AND q.proname='to_timestamp')",
+            ).fetchone()
+            if bad:
+                body = ("BEGIN RETURN " + _qident(schema) + ".datetime(x); END;")
+                base.execute(
+                    "CREATE OR REPLACE FUNCTION " + _qident(schema)
+                    + ".date(x text) RETURNS text LANGUAGE plpgsql "
+                    "IMMUTABLE AS " + "$fn$" + body + "$fn$")
+        except Exception:
+            try:
+                base.rollback()
+            except Exception:
+                pass
 
 
 def _existing_fts_tables(base) -> tuple:

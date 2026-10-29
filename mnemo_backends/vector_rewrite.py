@@ -45,7 +45,7 @@ try:  # pragma: no cover - circular-safe import
 except Exception:
     _PARAM_TOKEN = "\x00\x01\x00"
 # one alternation token matching a bare `?` or the protected sentinel
-_PX = r"(?:\?|" + re.escape(_PARAM_TOKEN) + r")"
+_PX = r"(?:\?|'?" + re.escape(_PARAM_TOKEN) + r"'?)"
 
 EMBEDDING_DIM_PLACEHOLDER = "{dim}"
 
@@ -55,10 +55,13 @@ EMBEDDING_DIM_PLACEHOLDER = "{dim}"
 _RE_VEC_DELETE = re.compile(
     r"(?i)DELETE\s+FROM\s+vec_(working|episodes|facts)\s+WHERE\s+rowid\s*=\s*\?")
 
-# INSERT INTO vec_X(rowid, embedding) VALUES (?, vec_quantize_binary(?))  (and int8/plain)
+# INSERT INTO vec_X(rowid, embedding) VALUES (?, vec_quantize_binary(?))  (and int8/plain).
+# Both slots accept a bare `?` OR the protected sentinel token (fts_conn
+# protects binds before handing SQL to the rewriter).
 _RE_VEC_INSERT = re.compile(
     r"(?i)INSERT\s+INTO\s+vec_(working|episodes|facts)\s*\(\s*rowid\s*,\s*embedding\s*\)\s*"
-    r"VALUES\s*\(\s*\?\s*,\s*(?:vec_quantize_(?:binary|int8)\s*\(\s*\?(?:\s*,\s*[\"']unit[\"'])?\s*\)|\?)\s*\)")
+    r"VALUES\s*\(\s*" + _PX + r"\s*,\s*(?:vec_quantize_(?:binary|int8)\s*\(\s*" + _PX +
+    r"(?:\s*,\s*[\"']unit[\"'])?\s*\)|" + _PX + r")\s*\)")
 
 # SELECT rowid, distance FROM vec_X WHERE embedding MATCH vec_quantize_*(?) AND k={k} ORDER BY distance
 # {k} may be an f-string placeholder already formatted, or a literal int.
@@ -230,9 +233,25 @@ def rewrite_sql(sql: str) -> str:
         lambda m: f"SELECT rowid, embedding <=> ? AS distance FROM vec_{m.group(1)} "
                   f"ORDER BY distance {_limit(m.group('k'))}",
         out)
-    out = _RE_VEC_INSERT.sub(
-        lambda m: f"INSERT INTO vec_{m.group(1)}(rowid, embedding) VALUES (?, ?::vector)",
-        out)
+    def _insert_typed(m):
+        whole = m.group(0)
+        # sqlite-vec quantizers accept a unit argument (vec_quantize_int8(v,
+        # 'unit')); PG parity takes only the vector. Strip the unit arg
+        # FIRST, with an operand-tolerant peel: `[^()]*?` also spans the
+        # sentinel token (protected `?`), which [?]|[\w.]* forms miss.
+        w = re.sub(r"(?i)(vec_quantize_(?:binary|int8)\s*\([^()]*?)"
+                   r"(?:\s*,\s*(?:\"unit\"|'unit'))(\s*\))", r"\1\2", whole)
+        # drop quantizer wrappers -> bare placeholder/sentinel in slot 2
+        w = _RE_QUANTIZE_UNIT.sub(lambda x: x.group(1), w)
+        w = _RE_QUANTIZE.sub(lambda x: x.group(1), w)
+        # type the embedding slot: rewrite `VALUES (X, Y)` -> `(X, Y::vector)`
+        w = re.sub(r"(?i)(VALUES\s*\(\s*[^,)]+\s*,\s*)([^)]+?)(\s*\))\s*$",
+                   r"\1\2::vector\3", w)
+        if "::vector" not in w:
+            w = re.sub(r"(?i)(VALUES\s*\(\s*[^,)]+\s*,\s*)([^)]+?)(\s*\))",
+                       r"\1\2::vector\3", w)
+        return w
+    out = _RE_VEC_INSERT.sub(_insert_typed, out)
     # DELETE FROM vec_X WHERE rowid = ? is already valid PG — no-op rewrite,
     # listed for documentation completeness:
     #   _RE_VEC_DELETE -> unchanged
@@ -242,6 +261,15 @@ def rewrite_sql(sql: str) -> str:
     # so scrub the arg wherever a quantizer call appears).
     if "unit" in out.lower() and "vec_quantize" in out.lower():
         out = _RE_UNIT_ARG.sub("", out)
+        # sentinel-protected param form: `vec_quantize_int8(<S>, "unit")` —
+        # the wrapper regexes need a tidy operand, so peel the unit tail
+        # wherever a quantizer call carries one (sentinels included).
+        out = re.sub(r"(?i)(vec_quantize_(?:binary|int8)\s*\([^()]*?)"
+                     r"(?:\s*,\s*(?:\"unit\"|'unit'))(\s*\))", r"\1\2", out)
+        # second chance: the tidy INSERT shape needed the unit arg gone
+        out = _RE_VEC_INSERT.sub(
+            lambda m: f"INSERT INTO vec_{m.group(1)}(rowid, embedding) "
+                      f"VALUES (?, ?::vector)", out)
     out = _fixup(out)
     return out
 
@@ -253,6 +281,9 @@ def _fixup(sql: str) -> str:
     surviving sqlite-vec surface fails LOUDLY (raw vec_quantize_* reaches PG
     as an undefined function) rather than silently doing the wrong thing."""
     s = sql
+    if "vec_quantize" in s.lower() and "unit" in s.lower():
+        s = re.sub(r"(?i)(vec_quantize_(?:binary|int8)\s*\([^()]*?)"
+                   r"(?:\s*,\s*(?:\"unit\"|'unit'))(\s*\))", r"\1\2", s)
     # Bare vec0 KNN shape: `WHERE <col> MATCH <operand> AND k=N ORDER BY
     # distance`. Runs BEFORE quantizer stripping (so the operand is still the
     # full vec_quantize_* call and its inner param/sentinel stays isolated),
@@ -293,13 +324,26 @@ def _fixup(sql: str) -> str:
     # non-FTS statement's slot), so feed it to <=> cast text->vector and make
     # the statement param-free (binds, if any, are the binder's doing).
     if "vec_quantize_" in s:
+        # operand-tolerant peel first: quantizer calls may carry a `"unit"`
+        # tail whose operand is the sentinel token (invisible to the tidy
+        # [\w.]* wrapper forms below).
+        s = re.sub(r"(?i)(vec_quantize_(?:binary|int8)\s*\([^()]*?)"
+                   r"(?:\s*,\s*(?:\"unit\"|'unit'))(\s*\))", r"\1\2", s)
         s = _RE_QUANTIZE_UNIT.sub(lambda m: m.group(1), s)
         s = _RE_QUANTIZE.sub(lambda m: m.group(1), s)
 
-    s = _RE_TSQ_KNN.sub(
-        lambda m: f"SELECT rowid, embedding <=> {m.group('v')}::text::vector "
-                  f"AS distance FROM vec_{m.group('tbl')} ORDER BY distance "
-                  f"LIMIT {int(m.group('k'))}", s)
+    def _tsq(m):
+        # The FTS binder's COPY wrapper is tsquery-oriented (it lexizes),
+        # which is wrong for a vector JSON literal. mnemo_vec_tsq is the
+        # vector-safe variant: SQL-quoted text cast to vector, no lexize.
+        lit = m.group("v")
+        k = m.group("k")
+        k = int(k) if k is not None and not k.startswith("{") else k
+        lim = "" if k == "" or k is None else f" LIMIT {k}"
+        return ("SELECT rowid, embedding <=> mnemo_vec_tsq('" + lit + "') "
+                "AS distance FROM vec_" + m.group("tbl") +
+                " ORDER BY distance" + lim)
+    s = _RE_TSQ_KNN.sub(_tsq, s)
     # vec0 companion tables all have (rowid BIGINT, embedding vector) in PG;
     # a vector literal/param bound into their INSERT must be typed.
     s = _RE_VEC_INSERT_TYPED.sub(
@@ -317,10 +361,18 @@ def _fixup(sql: str) -> str:
     s = _RE_VEC_MATCH_BLOB.sub(_blob, s)
     # KNN via MATCH: sqlite-vec's MATCH ? AND k=N == nearest-N by cosine
     # distance over (unit-normalised) embeddings.
-    s = _RE_VEC_MATCH_KNN.sub(
-        lambda m: f"SELECT rowid, embedding <=> ? AS distance FROM {m.group(1)} "
-                  f"ORDER BY distance"
-                  + (f" LIMIT {m.group('k')}" if m.group("k") is not None else ""), s)
+    def _knn_only(m):
+        # The pattern consumes up to k=N and emits its own ORDER BY/LIMIT;
+        # the source always carries a trailing `ORDER BY distance` after
+        # that — drop exactly one such leftover after the replacement.
+        head = (f"SELECT rowid, embedding <=> ? AS distance FROM {m.group(1)} "
+                "ORDER BY distance"
+                + (f" LIMIT {m.group('k')}" if m.group("k") is not None else ""))
+        tail = s[m.end():]
+        drop = re.match(r"(?:\s+AND\s+)?ORDER\s+BY\s+distance\b", tail,
+                        flags=re.IGNORECASE)
+        return head + tail[drop.end():] if drop else head + tail
+    s = _RE_VEC_MATCH_KNN.sub(_knn_only, s)
     # SELECT rowid, distance, embedding FROM vec_X WHERE embedding MATCH ?
     # AND k=N  — KNN that also returns the stored vector blob.
     s = _RE_VEC_MATCH_KNN_BLOB.sub(
