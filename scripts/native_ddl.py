@@ -379,7 +379,7 @@ def alter_statements(schema: str) -> list[str]:
             # a serial/sequence-fed or shim-identity key column is made plain
             # first so the ADD below (no default) matches the contract shape
             parts.append(f"ALTER COLUMN {col_name} DROP DEFAULT")
-            parts.append(f"DROP IDENTITY IF EXISTS {col_name}")
+            parts.append(f"ALTER COLUMN {col_name} DROP IDENTITY IF EXISTS")
             parts.append(f"ADD COLUMN IF NOT EXISTS {col_def}")
         stmts.append(
             f"ALTER TABLE {schema}.{name}\n    " + ",\n    ".join(parts))

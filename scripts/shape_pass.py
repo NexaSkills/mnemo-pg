@@ -44,6 +44,10 @@ def main():
         q = s.replace('"', '""')
         present = {r[0] for r in cur.execute(
             "SELECT table_name FROM information_schema.tables WHERE table_schema=%s", (s,))}
+        def cols_of(t):
+            return {r[0] for r in cur.execute(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_schema=%s AND table_name=%s", (s, t))}
         done = []
         # 1. unique key indexes FIRST (FKs need them)
         for t, key in KEY_COL.items():
@@ -68,7 +72,17 @@ def main():
             if any(d == "c" for _, d in fks):
                 done.append(f"fk {v} ok")
                 continue
-            # find PK column of base
+            # FK targets must reference a unique index; legacy schemas may
+            # lack the shim unique index that this pass relies on.
+            if f"{base}__rowid" not in cols_of(base):
+                try:
+                    cur.execute(f'CREATE UNIQUE INDEX IF NOT EXISTS '
+                                f'uq_{base}_rowid ON \"{q}\".\"{base}\" '
+                                f'(\"{base}__rowid\")')
+                except psycopg.Error:
+                    pass
+            # find a unique-key column of base (any single-column unique
+            # index qualifies as an FK target for the shim fallback below)
             cur.execute(
                 "SELECT a.attname FROM pg_index i "
                 "JOIN pg_class c ON c.oid=i.indrelid "
@@ -76,8 +90,21 @@ def main():
                 "JOIN unnest(i.indkey) WITH ORDINALITY k(k,o) ON true "
                 "JOIN pg_attribute a ON a.attrelid=c.oid AND a.attnum=k.k "
                 "WHERE n.nspname=%s AND c.relname=%s AND i.indisunique "
-                "ORDER BY i.indnkeyatts, k.o LIMIT 1", (s, base))
+                "AND i.indnatts=1 "
+                "ORDER BY i.indisprimary DESC, k.o LIMIT 1", (s, base))
             row = cur.fetchone()
+            if not row:
+                # single-column-unique check empty: fall back to a multi-
+                # column key's first column (shim logic below may still work)
+                cur.execute(
+                    "SELECT a.attname FROM pg_index i "
+                    "JOIN pg_class c ON c.oid=i.indrelid "
+                    "JOIN pg_namespace n ON n.oid=c.relnamespace "
+                    "JOIN unnest(i.indkey) WITH ORDINALITY k(k,o) ON true "
+                    "JOIN pg_attribute a ON a.attrelid=c.oid AND a.attnum=k.k "
+                    "WHERE n.nspname=%s AND c.relname=%s AND i.indisunique "
+                    "ORDER BY i.indnkeyatts, k.o LIMIT 1", (s, base))
+                row = cur.fetchone()
             if not row:
                 print(f"  {s}: fk {v} skip: no unique key found on {base}")
                 continue
@@ -132,6 +159,15 @@ def main():
                         print(f"  {s}: identity {base}.{shim} skip: "
                               f"{str(e).splitlines()[0][:70]}")
             pk = shim
+            # the FK target must be the shim itself: assert a unique index
+            # on <base>__rowid (FKs cannot reference a plain column)
+            try:
+                cur.execute(f'CREATE UNIQUE INDEX IF NOT EXISTS '
+                            f'uq_{base}_rowid ON "{q}"."{base}" ("{shim}")')
+            except psycopg.Error as e:
+                print(f"  {s}: uq {base}.{shim} skip: "
+                      f"{str(e).splitlines()[0][:70]}")
+                continue
             # data validation: every vec rowid must exist in base
             cur.execute(f'''SELECT count(*) FROM "{q}"."{v}" v
                 WHERE v.rowid IS NOT NULL AND NOT EXISTS

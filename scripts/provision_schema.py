@@ -141,17 +141,48 @@ def provision(conn, schema: str) -> dict:
         cur.execute("SELECT pg_advisory_lock(%s)", (lock_key(schema),))
         try:
             script = ddl_for(schema)
-            try:
-                with conn.transaction():
-                    for stmt in _split_statements(script):
+            # Legacy convergence FIRST (probe-proven order): the contract
+            # shape fixes (add <t>__rowid twin, guarded uq_* key indexes)
+            # must exist before the main script's FK/GIN statements that
+            # reference them; running main-script-first aborted the whole
+            # implicit transaction on legacy schemas.
+            import converge_ddl
+            applied, skipped = 0, 0
+            for stmt in converge_ddl.legacy_statements(schema, native_ddl.TABLES):
+                try:
+                    with conn.transaction():
                         cur.execute(stmt)
-            except psycopg.Error:
+                    applied += 1
+                except psycopg.Error as exc:
+                    skipped += 1
+                    print("  skip: %s\n        %s: %s" % (
+                        stmt.splitlines()[0][:90], type(exc).__name__,
+                        str(exc).strip().splitlines()[0][:120]),
+                        file=sys.stderr)
+            # Main DDL per-statement: every object is IF-[NOT-]EXISTS-guarded
+            # so a miss (e.g. uq_*_id on a table whose natural key is named
+            # differently in this lineage) skips without killing neighbours.
+            main_fails = 0
+            try:
+                split = _split_statements(script)
+                for stmt in split:
+                    try:
+                        with conn.transaction():
+                            cur.execute(stmt)
+                    except psycopg.Error as exc:
+                        main_fails += 1
+                        print("  skip: %s\n        %s: %s" % (
+                            stmt.splitlines()[0][:90], type(exc).__name__,
+                            str(exc).strip().splitlines()[0][:120]),
+                            file=sys.stderr)
+            except ValueError:
                 # splitter miss: PG script mode handles any valid script
                 cur.execute(script)
+            if main_fails:
+                print("  note: %d main-DDL statements skipped (converged by "
+                      "ALTERs/shape_pass)" % main_fails, file=sys.stderr)
 
-            # converge an existing (legacy) schema onto the contract with
-            # idempotent per-statement ALTERs; a fresh schema gets no-ops.
-            applied, skipped = 0, 0
+            # natural-column convergence ALTERs (idempotent no-ops on fresh)
             for stmt in native_ddl.alter_statements(schema):
                 try:
                     with conn.transaction():
@@ -176,7 +207,14 @@ def provision(conn, schema: str) -> dict:
                     'DROP TRIGGER IF EXISTS "%s" ON "%s"."%s"' % (trg, schema, table))
             for stmt in _split_statements(script):
                 if stmt.lstrip().upper().startswith("CREATE TRIGGER"):
-                    cur.execute(stmt)
+                    try:
+                        with conn.transaction():
+                            cur.execute(stmt)
+                    except psycopg.Error as exc:
+                        print("  skip: %s\n        %s: %s" % (
+                            stmt.splitlines()[0][:90], type(exc).__name__,
+                            str(exc).strip().splitlines()[0][:120]),
+                            file=sys.stderr)
 
             tables = cur.execute(
                 "SELECT count(*) FROM information_schema.tables "
