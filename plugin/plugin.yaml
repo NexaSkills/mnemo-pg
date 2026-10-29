@@ -1,0 +1,4 @@
+name: mnemosyne
+version: "0.7.4-mnemo-pg"
+description: "Mnemosyne memory on native PostgreSQL via mnemo-pg"
+author: "mnemo-pg (upstream provider: Abdias J)"
