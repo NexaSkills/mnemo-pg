@@ -27,8 +27,8 @@ for i in range(3):
 try:
     import psycopg
     dsn = "host=/home/mybuddy/lcm-pg/run port=54329 dbname=lcm user=lcm01"
-    with psycopg.connect(dsn) as c:
-        c.execute(f"SET search_path TO mnemosyne_{os.environ['MNEMO_PROFILE']}, public")
+    with psycopg.connect(dsn) as conn, conn.cursor() as c:
+        c.execute("SET search_path TO mnemosyne_%s, public" % os.environ['MNEMO_PROFILE'])
         c.execute("SELECT count(*) FROM working_memory")
         routes.append(f"pg_wm_rows: {c.fetchone()[0]}")
 except Exception as e:
