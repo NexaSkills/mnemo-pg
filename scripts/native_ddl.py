@@ -445,6 +445,58 @@ $$ LANGUAGE sql IMMUTABLE;""".replace("{schema}", schema))
     ELSE to_char(t, replace(replace(replace(fmt, '%Y', 'YYYY'), '%m', 'MM'), '%d', 'DD'))
   END
 $$ LANGUAGE sql IMMUTABLE;""".replace("{schema}", schema))
+
+    # FTS query normalizer: FTS5-style query text -> tsquery lexeme text.
+    # Same contract the shim's helper had, defined in native schema space.
+    # NOTE: backslashes here are REAL (single-quoted SQL literals inside a
+    # plain Python string) — do not add Python-level escaping.
+    a(r"""CREATE OR REPLACE FUNCTION {schema}.mnemo_normalize_fts(q text) RETURNS text
+LANGUAGE plpgsql IMMUTABLE PARALLEL SAFE AS $fn$
+-- FTS5-style query text -> valid to_tsquery argument (simple config).
+-- Connector words and prefix flags are masked with placeholder lexemes
+-- BEFORE the lexeme sanitizer and restored AFTER; bare adjacency joins with
+-- & (FTS5 default), 'tok*' becomes PG prefix form 'tok:*', NOT-only queries
+-- return NULL (callers skip the leg). NOTE: this Python string is RAW so
+-- backslashes reach SQL as single real characters.
+DECLARE s text;
+BEGIN
+    s := coalesce(q, '');
+    IF btrim(s) = '' THEN RETURN NULL; END IF;
+    s := lower(s);
+    s := regexp_replace(s, '\mnot\y',  ' zz0zz ', 'g');
+    s := regexp_replace(s, '\mor\y',   ' zz1zz ', 'g');
+    s := regexp_replace(s, '\mand\y',  ' zz2zz ', 'g');
+    s := replace(s, '|', ' zz1zz ');                       -- FTS5 pipe == OR
+    s := replace(s, '!', ' zz0zz ');                       -- FTS5 minus == NOT
+    s := replace(s, '"', ' ');                             -- phrase -> words
+    s := regexp_replace(s, '\m[a-z]+\s*/\s*[0-9]+\y', ' zz1zz ', 'g'); -- NEAR/n
+    s := regexp_replace(s, '([0-9a-z_]+)\*', '\1:zz4zz', 'g');         -- prefix flag
+    s := regexp_replace(s, '[^0-9a-z_:]+', ' ', 'g');      -- lexemes + markers
+    s := regexp_replace(s, '\s+', ' ', 'g');
+    s := btrim(s);
+    -- join runs of bare lexemes (no marker inside the run) with &
+    WHILE s ~ '(^|[ ])(?!zz)[0-9a-z_:]+ +(?!zz)[0-9a-z_:]+([ ]|zz|$)' LOOP
+        s := regexp_replace(s, '(^|[ ])((?!zz)[0-9a-z_:]+) +((?!zz)[0-9a-z_:]+)(?![0-9a-z_:])', '\1\2 & \3', 'g');
+    END LOOP;
+    -- restore connectors (FTS5 & AND ! are BINARY operators in PG: ! binds
+    -- like AND; "a NOT b" -> "a & !b")
+    s := regexp_replace(s, '\s*zz1zz\s*', ' | ', 'g');     -- OR
+    s := regexp_replace(s, '\s*zz0zz\s*', ' & ! ', 'g');   -- NOT
+    s := regexp_replace(s, '\s*zz2zz\s*', ' & ', 'g');     -- AND
+    s := regexp_replace(s, ':zz4zz', ':*', 'g');           -- prefix flag back
+    -- operator pileups collapse (rightmost operator wins where ambiguous)
+    s := regexp_replace(s, '(&|\|)( *(((&|\|)|!)))+', '\4', 'g');
+    s := regexp_replace(s, ' *! *([0-9a-z_:]+)', ' & !\1', 'g');  -- '!x' -> '& !x'
+    s := regexp_replace(s, '\s+', ' ', 'g');
+    s := btrim(s);
+    s := regexp_replace(s, '^((&|\|)+ *(& *!)?|& *!)+ *', '', 'g'); -- leading ops
+    s := regexp_replace(s, ' *((&|\|)+(& *!)?|& *!|!)+$', '', 'g'); -- trailing ops
+    s := regexp_replace(s, '^!+$', '', 'g');               -- bare NOT -> empty
+    s := btrim(s);
+    IF s = '' OR s !~ '[0-9a-z]' THEN RETURN NULL; END IF;
+    IF s ~ '^!' THEN RETURN NULL; END IF;                  -- NOT-only -> NULL
+    RETURN s;
+END $fn$;""".replace("{schema}", schema))
     return "\n".join(out) + "\n"
 
 
