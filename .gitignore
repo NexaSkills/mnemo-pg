@@ -2,3 +2,9 @@ __pycache__/
 *.pyc
 *.lock
 .DS_Store
+# probe DBs must never be committed (a stray sqlite file committed once caused
+# a 634KB blob + a phantom 81KB "Mnemosyne object" file in history)
+probe/*.db
+probe/*.db.*
+*.db-wal
+*.db-shm

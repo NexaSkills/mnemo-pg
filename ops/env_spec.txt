@@ -1,0 +1,6 @@
+# mnemo-pg deploy env pins (KEY=VALUE; deploy appends missing keys to root
+# and every profile .env). Source of truth for these keys is THIS file.
+MNEMO_BACKEND=postgres
+MNEMOSYNE_POLYPHONIC_RECALL=1
+MNEMOSYNE_EMBEDDING_MODEL=BAAI/bge-small-en-v1.5
+MNEMOSYNE_EMBEDDING_DIM=384
