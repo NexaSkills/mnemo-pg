@@ -39,7 +39,10 @@ import psycopg
 BASE_TABLES = ['working_memory', 'episodic_memory', 'facts', 'canonical_facts', 'triples', 'graph_edges', 'memoria_facts', 'memoria_persona', 'memoria_preferences', 'memoria_instructions', 'memoria_kg', 'memoria_timelines', 'scratchpad', 'consolidated_facts', 'consolidation_log', 'conflicts', 'memory_validations', 'memory_audit_events', 'memory_events', 'media_assets', 'media_moments', 'gists', 'annotations', 'audit_log', 'memory_embeddings']
 FTS_TABLES = {
     "working_memory": "content_tsv", "episodic_memory": "content_tsv",
-    "facts": "fact_tsv",
+    # live contract: the core's facts FTS column is object_tsv (object-arm
+    # tsvector maintained by the facts_object_tsv trigger), NOT fact_tsv —
+    # no schema in the fleet has fact_tsv and no core code writes one.
+    "facts": "object_tsv",
 }
 VEC_TABLES = {
     "vec_working": "working_memory",

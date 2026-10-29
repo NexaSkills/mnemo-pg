@@ -30,7 +30,10 @@ TSVECTOR_COLS = {
     "working_memory":  [("content_tsv",  "english", ["content"],   "working_memory__rowid")],
     "episodic_memory": [("summary_tsv",  "english", ["summary"],   "episodic_memory__rowid"),
                         ("content_tsv",  "english", ["content"],   "episodic_memory__rowid")],
-    "facts":           [("fact_tsv",     "english", ["fact"],      "facts__rowid")],
+    # live contract: the core's facts FTS runs on the object-arm tsvector
+    # (fts_facts indexes subject/predicate/object; the maintained PG column
+    # is object_tsv), NOT a fact_tsv — see scripts/heal_fts_views.py.
+    "facts":           [("object_tsv",   "english", ["object"],     "facts__rowid")],
 }
 
 VECTOR_TABLES = {
@@ -100,13 +103,24 @@ TABLES: list[tuple[str, list[str], list[str]]] = [
     ], []),
 
     ("facts", [
-        "id text PRIMARY KEY",
+        "fact_id text PRIMARY KEY",
         "fact text NOT NULL",
         "category text",
         "entities jsonb",
+        "subject text",
+        "predicate text",
+        "object text",
+        "session_id text",
+        "source_msg_id text",
+        "valid_from timestamptz",
+        "valid_until timestamptz",
+        "absorbed_into text",
+        "triple_source text",
+        "superseded_by text",
+        "supersede_reason text",
         "timestamp timestamptz NOT NULL DEFAULT now()",
         "created_at timestamptz NOT NULL DEFAULT now()",
-        "fact_tsv tsvector",                         # english, from fact
+        "object_tsv tsvector",                       # english, from object
         "importance real",
         "source text",
         "scope text",
@@ -348,6 +362,38 @@ INDEXES = [
     ("idx_cf_slot",         "canonical_facts", "btree (profile_id, category, name)"),
     ("idx_mm_asset",        "media_moments",   "btree (asset_id)"),
 ]
+
+
+def alter_statements(schema: str) -> list[str]:
+    """ALTER statements that converge an EXISTING (legacy/shim-era) schema
+    onto the native contract. One statement per table, built entirely from
+    IF-[NOT-]EXISTS clauses so PG skips present objects; never touches data.
+    Used by provision_schema.py; a fresh schema gets pure no-ops."""
+    stmts: list[str] = []
+    for name, cols, pk in TABLES:
+        rowid = f"{name}__rowid"
+        parts = [f"ADD COLUMN IF NOT EXISTS {rowid} bigint"]
+        for c in cols:
+            col_def = c.replace(" PRIMARY KEY", "")
+            col_name = col_def.split()[0]
+            # a serial/sequence-fed or shim-identity key column is made plain
+            # first so the ADD below (no default) matches the contract shape
+            parts.append(f"ALTER COLUMN {col_name} DROP DEFAULT")
+            parts.append(f"DROP IDENTITY IF EXISTS {col_name}")
+            parts.append(f"ADD COLUMN IF NOT EXISTS {col_def}")
+        stmts.append(
+            f"ALTER TABLE {schema}.{name}\n    " + ",\n    ".join(parts))
+        if pk:
+            stmts.append(
+                f"ALTER TABLE {schema}.{name} ADD UNIQUE IF NOT EXISTS "
+                f"({', '.join(pk)})")
+        for c in cols:
+            if c.endswith(" PRIMARY KEY"):
+                kcol = c.split()[0]
+                stmts.append(
+                    f"CREATE UNIQUE INDEX IF NOT EXISTS uq_{name}_{kcol} "
+                    f"ON {schema}.{name} ({kcol})")
+    return stmts
 
 
 def render(schema: str) -> str:

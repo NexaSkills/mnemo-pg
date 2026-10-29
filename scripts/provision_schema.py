@@ -35,6 +35,8 @@ _p = _ps.ensure_psycopg()
 import psycopg
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPO / "scripts"))
+import native_ddl  # noqa: E402
 LOCK_NS = 7766001  # stable namespace for mnemo-pg schema locks
 
 # (trigger, table) pairs whose bodies come from native_ddl — re-asserted.
@@ -42,7 +44,7 @@ TSVECTOR_TRIGGERS = (
     ("working_memory_content_tsv_ts_ins", "working_memory"),
     ("episodic_memory_content_tsv_ts_ins", "episodic_memory"),
     ("episodic_memory_summary_tsv_ts_ins", "episodic_memory"),
-    ("facts_fact_tsv_ts_ins", "facts"),
+    ("facts_object_tsv_ts_ins", "facts"),
 )
 FTS_TABLES = ("working_memory", "episodic_memory", "facts", "canonical_facts",
               "triples", "media_understandings", "media_assets",
@@ -146,8 +148,30 @@ def provision(conn, schema: str) -> dict:
             except psycopg.Error:
                 # splitter miss: PG script mode handles any valid script
                 cur.execute(script)
+
+            # converge an existing (legacy) schema onto the contract with
+            # idempotent per-statement ALTERs; a fresh schema gets no-ops.
+            applied, skipped = 0, 0
+            for stmt in native_ddl.alter_statements(schema):
+                try:
+                    with conn.transaction():
+                        cur.execute(stmt)
+                    applied += 1
+                except psycopg.Error as exc:
+                    skipped += 1
+                    print("  skip: %s\n        %s: %s" % (
+                        stmt.splitlines()[0][:90], type(exc).__name__,
+                        str(exc).strip().splitlines()[0][:120]),
+                        file=sys.stderr)
+
             # re-assert FTS trigger bodies from the same declarative source
+            # (skip cleanly if a table isn't present in this schema at all)
+            present = {r[0] for r in cur.execute(
+                "SELECT table_name FROM information_schema.tables "
+                "WHERE table_schema=%s", (schema,))}
             for trg, table in TSVECTOR_TRIGGERS:
+                if table not in present:
+                    continue
                 cur.execute(
                     'DROP TRIGGER IF EXISTS "%s" ON "%s"."%s"' % (trg, schema, table))
             for stmt in _split_statements(script):
