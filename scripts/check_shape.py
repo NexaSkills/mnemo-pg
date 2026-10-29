@@ -174,7 +174,7 @@ def main(argv: list[str]) -> int:
         trusted = True
     else:
         trusted = False
-    targets = [a for a in argv if not a.startswith("-")]
+    targets = [a for a in argv if not a.startswith("-") or a == "--all"]
     if targets == ["--all"]:
         conn = psycopg.connect(dsn(), autocommit=True)
         targets = [r[0] for r in conn.execute(

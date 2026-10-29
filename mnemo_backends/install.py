@@ -84,6 +84,16 @@ def _placeholder_store_path(database: str) -> bool:
     import os
     try:
         p = str(database)
+        # Explicit PG mode: route EVERY file-backed connect to the PG backend
+        # (factory.connect is the authority on schema selection). A genuine
+        # SQLite file on disk must NOT veto routing — that check once pinned
+        # all core traffic to SQLite while MNEMO_BACKEND=postgres.
+        try:
+            from . import factory as _f
+            if _f.backend_for() == "postgres":
+                return True
+        except Exception:
+            pass
         if os.path.isfile(p) and os.path.getsize(p) > 512:
             with open(p, "rb") as fh:
                 if fh.read(16) == b"SQLite format 3\x00":

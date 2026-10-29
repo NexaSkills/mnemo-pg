@@ -38,6 +38,8 @@ def bind_vendor() -> bool:
     except Exception as exc:  # pragma: no cover
         _ERRORS.append(f"backends unavailable: {exc}")
         return False
+    import importlib as _il
+    _install_hook = _il.import_module(__package__ + ".install")  # package attr "install" is a function
 
     import sqlite3 as _sqlite3
     proxy = sqlite3_compat.sqlite3_if_postgres(_sqlite3)
@@ -53,7 +55,7 @@ def bind_vendor() -> bool:
                 except Exception as exc:  # pragma: no cover
                     _ERRORS.append(f"{name}: {exc}")
     try:
-        sqlite3_compat.install_stdlib_connect_hook()
+        _install_hook.install_stdlib_connect_hook()
     except Exception as exc:  # pragma: no cover
         _ERRORS.append(f"stdlib hook: {exc}")
         return False
