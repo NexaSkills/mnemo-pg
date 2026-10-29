@@ -143,7 +143,8 @@ if [[ $NORESTART -eq 0 && $DRY -eq 0 ]]; then
 fi
 
 # ----------------------------------------------------------- 5. CHECK_ALL
-python3 "$PLUGIN_DIR/scripts/check_all.py" || CHECKRC=$1
+CHECKRC=0
+python3 "$PLUGIN_DIR/scripts/check_all.py" || CHECKRC=$?
 echo
 echo "== mnemo_update summary =="
 echo "ref: $COMMIT"

@@ -7,8 +7,12 @@ returned NULL and the view fell back to `t.oid` -- which under a schema's
 search_path resolves to the schema's own `date(text)` parity shim, giving
 "column <table>.oid does not exist". Fix: cast indkey to int4[] explicitly.
 """
+import os as _os, sys as _sys
+_sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
 import os
 import sys
+from mnemo_backends import psycopg_site as _ps
+_p = _ps.ensure_psycopg()
 import psycopg
 
 DSN = dict(host=os.path.expanduser("~/lcm-pg/run"), port=54329,

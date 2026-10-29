@@ -15,6 +15,8 @@ The text form uses a plpgsql function with an exception handler so a
 malformed string returns NULL like SQLite's julianday() would.
 """
 
+import os as _os, sys as _sys
+_sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
 import os
 import re
 import pathlib

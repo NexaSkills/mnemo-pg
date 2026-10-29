@@ -18,6 +18,8 @@ derivations). Episodic_memory has a real rowid column and it IS copied.
 Usage:
     python3 scripts/migrate_sqlite.py <sqlite.db> <schema> [--dry]
 """
+import os as _os, sys as _sys
+_sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
 import os
 import pathlib
 import sqlite3

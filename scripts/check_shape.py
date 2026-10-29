@@ -24,12 +24,16 @@ type). This mode is for --all sweeps; a fresh schema must pass WITHOUT the flag.
 DSN: $MNEMO_PG_DSN, else $HERMES_HOME/.env, else private lcm-pg cluster.
 """
 from __future__ import annotations
+import os as _os, sys as _sys
+_sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
 
 import os
 import pathlib
 import re
 import sys
 
+from mnemo_backends import psycopg_site as _ps
+_p = _ps.ensure_psycopg()
 import psycopg
 
 BASE_TABLES = ['working_memory', 'episodic_memory', 'facts', 'canonical_facts', 'triples', 'graph_edges', 'memoria_facts', 'memoria_persona', 'memoria_preferences', 'memoria_instructions', 'memoria_kg', 'memoria_timelines', 'scratchpad', 'consolidated_facts', 'consolidation_log', 'conflicts', 'memory_validations', 'memory_audit_events', 'memory_events', 'media_assets', 'media_moments', 'gists', 'annotations', 'audit_log', 'memory_embeddings']

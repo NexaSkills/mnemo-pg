@@ -20,6 +20,8 @@ concurrent provisioners serialize instead of racing IF-NOT-EXISTS.
 DSN: $MNEMO_PG_DSN, else $HERMES_HOME/.env, else the private lcm-pg cluster.
 """
 from __future__ import annotations
+import os as _os, sys as _sys
+_sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
 
 import hashlib
 import os
@@ -28,6 +30,8 @@ import re
 import subprocess
 import sys
 
+from mnemo_backends import psycopg_site as _ps
+_p = _ps.ensure_psycopg()
 import psycopg
 
 REPO = pathlib.Path(__file__).resolve().parent.parent

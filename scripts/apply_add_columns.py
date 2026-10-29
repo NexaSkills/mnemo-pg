@@ -10,6 +10,8 @@ Ponytail: scrape the truth from source, don't hand-maintain a column list.
 
 Usage: python3 scripts/apply_add_columns.py <schema> [<schema> ...]
 """
+import os as _os, sys as _sys
+_sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
 import os
 import re
 import sys

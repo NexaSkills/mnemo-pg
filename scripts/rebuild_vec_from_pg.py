@@ -11,9 +11,13 @@ memory schemas that have one); resolved per table.
 
 Usage: python3 scripts/rebuild_vec_from_pg.py <schema>
 """
+import os as _os, sys as _sys
+_sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
 import os
 import sys
 
+from mnemo_backends import psycopg_site as _ps
+_p = _ps.ensure_psycopg()
 import psycopg
 
 

@@ -11,6 +11,8 @@ Sections (each prints PASS/WARN/FAIL rows):
 Exit 0 = no FAIL rows.
 """
 from __future__ import annotations
+import os as _os, sys as _sys
+_sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
 
 import os
 import pathlib
@@ -107,10 +109,11 @@ def main() -> int:
             probe = (
                 "import sys,os;"
                 f"sys.path.insert(0,{str(REPO / 'plugin')!r});"
-                "import plugin;"
+                f"sys.path.insert(0,{str(REPO)!r});"
+                "import importlib; importlib.import_module('plugin');"
                 "from mnemosyne.core.memory import Mnemosyne;"
                 f"e=Mnemosyne(db_path={str(home / 'mnemosyne' / 'data' / 'mnemosyne.db')!r});"
-                "r=e.recall('memory', limit=1);"
+                "r=e.recall('memory', top_k=1);"
                 "print('RECALL_OK', len(r))")
             r = subprocess.run([sys.executable, "-I", "-c", probe],
                                capture_output=True, text=True, timeout=120,

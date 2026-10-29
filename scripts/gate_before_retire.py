@@ -11,6 +11,8 @@ per-agent provider banks; the fleet provider path only ever opens the per-home
 data/mnemosyne.db (schema mnemosyne_<profile>). Retirement archives the whole
 tree, so nothing is lost by not gating those paths.
 """
+import os as _os, sys as _sys
+_sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
 import os, pathlib, subprocess, sys, time
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
