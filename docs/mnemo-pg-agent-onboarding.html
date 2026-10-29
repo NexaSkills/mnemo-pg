@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>mnemo-pg — Agent Onboarding (template/fleet)</title>
+<style>
+  :root{
+    --bg:#f6f7f9; --card:#ffffff; --ink:#1a2230; --muted:#5b6675;
+    --brand:#0d3b66; --brand2:#1266a3; --ok:#1c7c43; --warn:#b26a00; --bad:#b02a2a;
+    --line:#dfe4ea; --code-bg:#eef1f5; --chip:#e7eef7;
+  }
+  @media (prefers-color-scheme: dark){
+    :root{ --bg:#10151c; --card:#171d26; --ink:#e7ecf3; --muted:#9aa7b8;
+      --brand:#7db4e6; --brand2:#a5cdf0; --ok:#5ecb8f; --warn:#e0a34e; --bad:#f08a8a;
+      --line:#2a3340; --code-bg:#1f2733; --chip:#22303f; }
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+    font-family:system-ui,-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    line-height:1.55;font-size:15px}
+  .wrap{max-width:1000px;margin:0 auto;padding:32px 20px 64px}
+  header{border-bottom:3px solid var(--brand);padding-bottom:14px;margin-bottom:22px}
+  header h1{margin:0 0 4px;font-size:26px;color:var(--brand)}
+  header .meta{color:var(--muted);font-size:13px}
+  .chip{display:inline-block;background:var(--chip);color:var(--brand2);
+    border:1px solid var(--line);border-radius:999px;padding:1px 10px;
+    font-size:12px;margin-right:6px;white-space:nowrap}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px;margin:18px 0 6px}
+  .kcard{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:12px 14px}
+  .kcard .k{font-size:12px;color:var(--muted);text-transform:uppercase;letter-spacing:.06em;margin:0 0 4px}
+  .kcard .v{font-size:14px;font-weight:600;color:var(--ink)}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:12px;
+    padding:18px 20px;margin:16px 0}
+  .card h2{margin:0 0 8px;font-size:20px;color:var(--brand)}
+  .card h3{margin:18px 0 6px;font-size:16px;color:var(--brand2)}
+  code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+    font-size:.92em;background:var(--code-bg);border:1px solid var(--line);
+    border-radius:5px;padding:1px 5px}
+  pre{background:var(--code-bg);border:1px solid var(--line);border-radius:9px;
+    padding:12px 14px;overflow-x:auto;font-size:13px;line-height:1.5}
+  pre code{background:transparent;border:none;padding:0}
+  table{border-collapse:collapse;width:100%;font-size:13.5px;margin:8px 0}
+  th,td{border:1px solid var(--line);padding:7px 10px;text-align:left;vertical-align:top}
+  th{background:var(--chip);color:var(--brand);font-size:12.5px;text-transform:uppercase;letter-spacing:.04em}
+  td code{white-space:nowrap}
+  .ok{color:var(--ok);font-weight:600}
+  .warn{color:var(--warn);font-weight:600}
+  .bad{color:var(--bad);font-weight:600}
+  ul,ol{padding-left:22px} li{margin:3px 0}
+  footer{margin-top:34px;color:var(--muted);font-size:12px;border-top:1px solid var(--line);padding-top:10px}
+  a{color:var(--brand2)}
+  .callout{border-left:4px solid var(--warn);background:color-mix(in srgb,var(--warn) 8%,var(--card));
+    padding:10px 14px;border-radius:0 8px 8px 0;margin:12px 0}
+  .callout.good{border-left-color:var(--ok);background:color-mix(in srgb,var(--ok) 8%,var(--card))}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <h1>mnemo-pg — Agent Onboarding (template &amp; fleet)</h1>
+  <div class="meta">
+    PostgreSQL-native memory backend for the Mnemosyne provider ·
+    repo <a href="https://github.com/NexaSkills/mnemo-pg">NexaSkills/mnemo-pg</a> ·
+    doc date 2026-10-29 · scope: <code>~/.hermes</code> only
+  </div>
+</header>
+
+<div class="grid">
+  <div class="kcard"><p class="k">Contract</p><p class="v">One schema per profile<br><code>mnemosyne_&lt;profile&gt;</code></p></div>
+  <div class="kcard"><p class="k">Deploy flow</p><p class="v">beez → GitHub →<br><code>mnemo_update.sh</code> on host</p></div>
+  <div class="kcard"><p class="k">SQLite</p><p class="v">Retired: archive + delete<br>+ tripwire timer</p></div>
+  <div class="kcard"><p class="k">Gates</p><p class="v">check_all · shape ·<br>vec coverage · recall</p></div>
+</div>
+
+<div class="card">
+  <h2>1. What mnemo-pg is</h2>
+  <p>mnemo-pg replaces the SQLite storage layer under the <code>mnemosyne</code> Hermes
+  memory provider with <b>native PostgreSQL</b> on the existing <code>lcm-pg</code> cluster
+  (PG 18.6, pgvector, tsvector/GIN FTS). The hooks and 57 <code>mnemosyne_*</code> tools
+  Hermes sees are unchanged — only the storage path swaps. A profile never touches SQLite:
+  the provider class comes from the repo loader and <code>sqlite3.connect</code> to store
+  paths is bound to the PG backend.</p>
+  <ul>
+    <li>One schema per Hermes agent profile: <code>mnemosyne_default</code>, <code>mnemosyne_alpha</code>, …</li>
+    <li>Native shapes: <code>bigint</code> identity rowids, HNSW <code>vector(384)</code> cosine KNN,
+        tsvector+GIN full-text with <code>mnemo_normalize_fts</code>, FK <code>ON DELETE CASCADE</code> vec companions.</li>
+    <li><b>No shims at deploy time</b>: schema is provisioned from <code>native_ddl.py</code>; the
+        legacy runtime shim exists only for the SQLite→PG migration window and is retired with the DBs.</li>
+  </ul>
+</div>
+
+<div class="card">
+  <h2>2. Deploy a host (template today, fleet later)</h2>
+  <p>Authoring happens <b>only on beez</b> (<code>~/workspace/mnemo-pg/repo</code> →
+  push to <code>main</code>). Hosts run exactly one script:</p>
+  <pre><code>bash ~/.hermes/plugins/mnemo-pg/mnemo_update.sh --ref main</code></pre>
+  <p>What it does, in order (mirrors lcm-pg pipeline v2):</p>
+  <ol>
+    <li><b>Fetch</b> the pinned GitHub ref (fresh clone into the plugin location on clean hosts).</li>
+    <li><b>Materialize</b> code into <code>~/.hermes/plugins/mnemo-pg/</code> and link
+        <code>~/.hermes/plugins/mnemosyne</code> + every <code>profiles/&lt;p&gt;/plugins/mnemosyne</code>
+        <b>directory</b> to the repo's <code>plugin/</code> loader (content replaced, path kept —
+        see the gotcha in §4).</li>
+    <li><b>Params</b>: pins <code>ops/env_spec.txt</code> (<code>MNEMO_BACKEND=postgres</code>,
+        embeddings, polyphonic flag) into root + profile <code>.env</code>; retires any
+        <code>*mnemo-poly*.conf</code> systemd overrides (root <code>.env</code> is the single source).</li>
+    <li><b>DB migrations BEFORE restarts</b>: provision schemas, migrate that host's own SQLite
+        data (parity-gated), stamp per (schema, ref) so reruns are no-ops.</li>
+    <li><b>Discover &amp; restart all surfaces</b> (<code>systemctl --user</code> units matching <code>hermes-*</code>).</li>
+    <li><b><code>check_all.py</code></b> prints the full matrix — that's the gate.</li>
+  </ol>
+</div>
+
+<div class="card">
+  <h2>3. Create a new agent profile (already migrated)</h2>
+  <p>The new-profile tooling on this host is <b>mnemo-pg-aware</b> (see
+  <code>scripts/new_profile.sh</code> in the repo). It:</p>
+  <ol>
+    <li>Creates <code>~/.hermes/profiles/&lt;name&gt;/</code> (config from default, plugin dirs).</li>
+    <li>Provisions <code>mnemosyne_&lt;name&gt;</code> in PG
+        (<code>scripts/provision_schema.py</code>, idempotent).</li>
+    <li>Links <code>profiles/&lt;name&gt;/plugins/mnemosyne</code> content to the mnemo-pg loader
+        and pins <code>ops/env_spec.txt</code> keys into <code>profiles/&lt;name&gt;/.env</code>.</li>
+    <li>Runs <code>scripts/check_shape.py mnemosyne_&lt;name&gt;</code> +
+        <code>scripts/check_all.py</code> so the profile is correct from its first turn.</li>
+  </ol>
+  <div class="callout good">On an already-deployed host, creating a profile is also
+  self-healing: the plugin loader's <code>_ensure_schema</code> provisions any missing
+  schema at first use — but the scripted route is the verified one.</div>
+</div>
+
+<div class="card">
+  <h2>4. The one gotcha: pip vs the plugin dir</h2>
+  <p><b>Symptom:</b> an agent answers about old context, and its SQLite
+  <code>mnemosyne.db</code> mtime keeps moving — it's running the <b>pip-installed</b>
+  provider (<code>site-packages/mnemosyne_hermes/</code>), not mnemo-pg.</p>
+  <p><b>Cause:</b> Hermes discovers plugins from <b>both</b> the plugin <i>directory</i>
+  (loads its <code>register()</code> from disk) and the pip-installed <i>package</i>
+  re-exported by that catalog shim. The install flow replaces the
+  <code>plugins/mnemosyne/</code> <b>directory contents in place</b> (path must stay
+  <code>plugins/mnemosyne</code>). A symlink named <code>mnemosyne</code> is not accepted as
+  that directory by the plugin machinery on some hosts.</p>
+  <p><b>Fix:</b> <code>mnemo_update.sh</code> materializes the loader as the directory
+  contents; <code>check_all.py</code> verifies the running provider's <code>__file__</code>
+  resolves under <code>~/.hermes/plugins/mnemo-pg/</code>, not <code>site-packages</code>.</p>
+</div>
+
+<div class="card">
+  <h2>5. Config changes — single sources of truth</h2>
+  <table>
+    <tr><th>Setting</th><th>Source of truth</th><th>Notes</th></tr>
+    <tr><td><code>MNEMO_BACKEND</code></td><td><code>ops/env_spec.txt</code> (repo-pinned)</td>
+        <td>Code default is <code>postgres</code>; unset is allowed and means PG. <code>sqlite</code> only for parity tests.</td></tr>
+    <tr><td><code>MNEMOSYNE_POLYPHONIC_RECALL</code></td><td>root <code>~/.hermes/.env</code></td>
+        <td>Deploy retires conflicting systemd <code>*mnemo-poly*.conf</code> overrides. Vector-quality ranking needs this ON.</td></tr>
+    <tr><td><code>MNEMOSYNE_EMBEDDING_MODEL/DIM</code></td><td>root <code>~/.hermes/.env</code> (repo pins)</td>
+        <td><code>BAAI/bge-small-en-v1.5</code> @ 384 fp32 everywhere.</td></tr>
+    <tr><td>PG DSN</td><td><code>~/.hermes/.env</code></td>
+        <td>Defaults to the local lcm-pg cluster (<code>~/lcm-pg/run:54329</code>, db <code>lcm</code>); <code>MNEMO_PG_DSN</code> overrides.</td></tr>
+  </table>
+  <div class="callout">Never edit <code>config.yaml</code> plugin entries or drop-ins by hand for
+  memory settings — <code>mnemo_update.sh</code> is idempotent and owns these; hand-edits drift and get flagged by <code>check_all</code>.</div>
+</div>
+
+<div class="card">
+  <h2>6. Verify a profile / host</h2>
+  <pre><code>cd ~/.hermes/plugins/mnemo-pg
+python3 scripts/check_all.py                 # full matrix (backend, schemas, shape, vec, config)
+python3 scripts/check_shape.py mnemosyne_&lt;p&gt; # native shape: identity rowids, GIN, HNSW, FKs, fts fn
+bash probe/parity_check.sh                   # sqlite-vs-pg recall parity (PROFILE=.. on fleet hosts)</bash>
+  <p>Green = provider from the repo dir, every profile schema provisioned + shaped, vector
+  coverage 100%, recall probes return relevant hits with polyphonic scoring, and
+  <code>retire_check.py</code> is clean (no live SQLite).</p>
+</div>
+
+<div class="card">
+  <h2>7. SQLite retirement (done as part of deploy)</h2>
+  <ul>
+    <li><code>scripts/retire_sqlite.py</code> archives every live
+        <code>mnemosyne*.db(-wal|-shm)</code> to <code>~/.hermes/backups/mnemosyne-sqlite-retired-&lt;ts&gt;/</code>
+        and deletes originals (verification before delete; <code>--dry-run</code> supported).</li>
+    <li><code>scripts/retire_check.py</code> runs on the
+        <code>mnemo-sqlite-tripwire</code> systemd-user timer every 10 min and alarms if a live
+        SQLite DB reappears (i.e. something is still writing the old path).</li>
+    <li>Backups stay inside <code>~/.hermes</code>; nothing outside <code>~/.hermes</code> is touched.</li>
+  </ul>
+</div>
+
+<div class="card">
+  <h2>8. Current fleet state</h2>
+  <table>
+    <tr><th>Host</th><th>Status</th><th>Detail</th></tr>
+    <tr><td>beez (dev)</td><td class="ok">SWITCHED</td>
+        <td>All 5 profiles route PG; recall parity sqlite↔pg 8/8; retirement gate PASS; SQLite archived+deleted; tripwire installed.</td></tr>
+    <tr><td>mybuddy-template</td><td class="warn">ITERATION 1</td>
+        <td>Deploy run in progress (§2) — provider-dir fix being validated this iteration.</td></tr>
+    <tr><td>rest of fleet</td><td>PARKED</td><td>Out of scope until template is end-to-end green (Jan's scope lock).</td></tr>
+  </table>
+</div>
+
+<div class="card">
+  <h2>9. Quick reference</h2>
+  <pre><code>repo (deploy):   ~/.hermes/plugins/mnemo-pg        # materialized from GitHub
+plugin loader:   ~/.hermes/plugins/mnemo-pg/plugin # = plugins/mnemosyne content
+deploy:          bash mnemo_update.sh --ref main
+gates:           scripts/check_all.py · check_shape.py · check_vec_coverage.py
+retire:          scripts/retire_sqlite.py [--dry-run] · scripts/retire_check.py
+tripwire timer:  systemctl --user list-timers 'mnemo-*'
+schemas:         psql -h ~/lcm-pg/run -p 54329 -U lcm01 -d lcm  →  mnemosyne_* (+ _shared)</code></pre>
+</div>
+
+<footer>
+  mnemo-pg · agent onboarding · maintained in <a href="https://github.com/NexaSkills/mnemo-pg">NexaSkills/mnemo-pg</a>
+  · questions: Jan / mike (beez)
+</footer>
+</div>
+</body>
+</html>
