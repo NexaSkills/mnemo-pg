@@ -91,7 +91,16 @@ def _placeholder_store_path(database: str) -> bool:
             if _f.backend_for() == "postgres":
                 return True
         except Exception:
-            pass
+            # Explicit PG mode but the backend stack itself is broken
+            # (e.g. missing psycopg_pool). Fail LOUD — a silent False here
+            # pins all core traffic to SQLite while MNEMO_BACKEND=postgres.
+            import sys
+            if not getattr(_placeholder_store_path, "_warned", False):
+                _placeholder_store_path._warned = True
+                import traceback
+                print("mnemo-pg: MNEMO_BACKEND=postgres but backend import failed; "
+                      "STAYING ON SQLITE:", file=sys.stderr)
+                traceback.print_exc()
         if os.path.isfile(p) and os.path.getsize(p) > 512:
             with open(p, "rb") as fh:
                 if fh.read(16) == b"SQLite format 3\x00":

@@ -867,6 +867,18 @@ class _FtsCursor:
                     _sp = _protect_params(_protect_percents(sql))
                     _rvr = _vr.rewrite_sql(_sp)
                     if _rvr != _sp:
+                        # A vector rewrite on a statement with NO tsquery
+                        # predicate: every sentinel is a genuine bind of the
+                        # original `?` order (e.g. vec INSERT VALUES(sent,
+                        # sent::vector) after quantizer stripping). The FTS
+                        # copy-binder would misbake them as mnemo_tsq(...)
+                        # literals -> DatatypeMismatch. Bypass it: unprotect
+                        # positionally and keep params as-is. If an FTS
+                        # predicate DID appear, defer to the normal binder.
+                        if "@@" not in _rvr:
+                            self._cur.execute(_unprotect_params(_rvr),
+                                              parameters)
+                            return self
                         sql = _rvr  # sentinel-preserving; binder takes over
                     else:
                         _fj = _vr.rewrite_sql(sql)

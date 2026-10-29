@@ -67,11 +67,21 @@ def _append_psycopg_site() -> None:
             return
     except Exception:
         return
-    try:
-        import psycopg  # noqa: F401
+    # NOTE: psycopg alone is not enough — mnemo_backends.postgres also
+    # imports psycopg_pool. Loop through ALL candidates and only stop when
+    # BOTH are importable (a host-interpreter psycopg must not short-circuit
+    # the loop, or factory.connect dies with ModuleNotFoundError: psycopg_pool
+    # and the connect hook silently falls back to SQLite).
+    def _both_ok() -> bool:
+        try:
+            import psycopg  # noqa: F401
+            import psycopg_pool  # noqa: F401
+            return True
+        except Exception:
+            return False
+
+    if _both_ok():
         return
-    except Exception:
-        pass
     for cand in (os.environ.get("MNEMO_PG_VENV_SITE"),
                  os.path.expanduser("~/lcm-pg/venv/lib/python3.12/site-packages"),
                  os.path.expanduser("~/lcm-pg/venv/lib/python3.14/site-packages")):
