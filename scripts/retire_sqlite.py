@@ -14,6 +14,8 @@ import argparse, datetime, os, pathlib, shutil, subprocess, sys
 
 HERMES = pathlib.Path.home() / ".hermes"
 UNITS = pathlib.Path.home() / ".config/systemd/user"
+# self-locate: this script lives in <repo>/scripts, ops units in <repo>/ops
+PLUGIN_DIR = pathlib.Path(__file__).resolve().parent.parent
 if os.environ.get("MNEMO_TRIPWIRE_UNITS"):
     UNITS = pathlib.Path(os.environ["MNEMO_TRIPWIRE_UNITS"])
 
@@ -56,23 +58,8 @@ def main():
     # tripwire units
     svc = UNITS / "mnemo-sqlite-tripwire.service"
     tmr = UNITS / "mnemo-sqlite-tripwire.timer"
-    svc_text = f"""[Unit]
-Description=mnemo-pg SQLite resurrection tripwire
-
-[Service]
-Type=oneshot
-ExecStart=/usr/bin/python3 {HERMES}/mnemo-pg/repo/scripts/retire_check.py
-"""
-    tmr_text = """[Unit]
-Description=Run mnemo SQLite tripwire every 10 minutes
-
-[Timer]
-OnBootSec=2min
-OnUnitActiveSec=10min
-
-[Install]
-WantedBy=timers.target
-"""
+    svc_text = (PLUGIN_DIR / "ops" / "mnemo-sqlite-tripwire.service").read_text()
+    tmr_text = (PLUGIN_DIR / "ops" / "mnemo-sqlite-tripwire.timer").read_text()
     for f, text in ((svc, svc_text), (tmr, tmr_text)):
         if a.dry_run:
             print(f"DRY would write {f}")

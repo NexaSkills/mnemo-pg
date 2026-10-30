@@ -39,7 +39,7 @@ def main() -> int:
     moved = 0
     for p in sorted(HERMES.rglob("*.db")):
         s = str(p)
-        if "mnemosyne" not in p.name.lower():
+        if "mnemosyne" not in s.lower():
             continue
         if "/backups/" in s or "/mnemo-pg/" in s:
             continue
@@ -63,3 +63,4 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+# (bodies above; kept append-safe)
