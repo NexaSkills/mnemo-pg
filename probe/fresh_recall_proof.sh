@@ -20,7 +20,7 @@ from mnemosyne import Mnemosyne
 mark = sys.argv[1]
 eng = Mnemosyne()
 try:
-    mid = eng.remember(f"fresh proof marker {mark}: zebra stripes anatomy", importance=0.9)
+    mid = eng.remember(f"fresh proof marker {mark}: zebra stripes anatomy", importance=0.9, source="fact")
     print("remember:", "OK", mid)
 except Exception as e:
     print("remember: FAIL", type(e).__name__, e)

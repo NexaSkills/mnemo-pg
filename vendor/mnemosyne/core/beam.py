@@ -2599,6 +2599,17 @@ def _normalize_datetime_utc(dt: datetime) -> datetime:
     return dt.astimezone(timezone.utc)
 
 
+def _as_iso_str(value):
+    """Normalize a TIMESTAMP column value to the sqlite-canonical ISO
+    string. SQLite stores these as text; the Postgres backend hands back
+    datetime objects, which crashed json.dumps in the provider recall
+    handler ('Object of type datetime is not JSON serializable')."""
+    if value is None or isinstance(value, str):
+        return value
+    iso = getattr(value, "isoformat", None)
+    return iso() if callable(iso) else str(value)
+
+
 def _parse_iso_datetime_utc(value: str) -> datetime:
     """Parse an ISO datetime string and normalize it to UTC."""
     return _normalize_datetime_utc(datetime.fromisoformat(value.replace("Z", "+00:00")))
@@ -6741,6 +6752,15 @@ class BeamMemory:
         rows = global_rows + session_rows
         if not rows:
             return rows
+
+        # The PG backend hands TIMESTAMP columns back as datetime objects
+        # (SQLite stored ISO text). Normalize before the bump loop so every
+        # downstream result consumer (json.dumps in the provider, etc.)
+        # sees the sqlite-canonical ISO string shape.
+        for _r in rows:
+            _lr = _r.get("last_recalled") if hasattr(_r, "get") else None
+            if not isinstance(_lr, str):
+                _r["last_recalled"] = _lr.isoformat() if _lr is not None else None
 
         # Batch bump recall_count + last_recalled in a single UPDATE
         # with bulk WHERE IN (...) to reduce write amplification on the
@@ -11430,14 +11450,14 @@ class BeamMemory:
             "session_id": row["session_id"] if "session_id" in row.keys() else None,
             "importance": row["importance"],
             "recall_count": row["recall_count"] or 0,
-            "last_recalled": row["last_recalled"],
+            "last_recalled": _as_iso_str(row["last_recalled"]),
             "scope": row["scope"] if "scope" in row.keys() else "session",
             "author_id": row["author_id"] if "author_id" in row.keys() else None,
             "author_type": row["author_type"] if "author_type" in row.keys() else None,
             "channel_id": row["channel_id"] if "channel_id" in row.keys() else None,
             "veracity": row["veracity"] if "veracity" in row.keys() else "unknown",
             "memory_type": row["memory_type"] if "memory_type" in row.keys() else "unknown",
-            "valid_until": row["valid_until"] if "valid_until" in row.keys() else None,
+            "valid_until": _as_iso_str(row["valid_until"]) if "valid_until" in row.keys() else None,
             "superseded_by": row["superseded_by"] if "superseded_by" in row.keys() else None,
             "tier": tier_label,
         }

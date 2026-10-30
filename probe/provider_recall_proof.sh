@@ -18,7 +18,7 @@ try: prov.initialize(os.environ.get("PROV_SESSION", "provproof"))
 except Exception: pass
 beam = prov._beam
 marker = "PROOFMARK " + uuid.uuid4().hex[:8]
-mid = beam.remember(marker + " zebra stripes anatomy provider proof", importance=0.9)
+mid = beam.remember(marker + " zebra stripes anatomy provider proof", importance=0.9, source="fact")
 res = prov.handle_tool_call("mnemosyne_recall", {"query": marker + " zebra stripes anatomy", "limit": 10})
 data = json.loads(res)
 hits = data.get("results") or []

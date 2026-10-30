@@ -18,7 +18,7 @@ import plugin
 from mnemosyne import Mnemosyne
 mark = os.environ["MARK"]
 eng = Mnemosyne()
-mid = eng.remember("live sim marker " + mark + ": coffee brewing temperatures guide", importance=0.9)
+mid = eng.remember("live sim marker " + mark + ": coffee brewing temperatures guide", importance=0.9, source="fact")
 hits = eng.recall("coffee brewing temperatures", top_k=10)
 rank = next((i+1 for i,h in enumerate(hits) if mark in (h.get("content") or "")), None)
 print("mid:", mid, "hits:", len(hits), "marker_rank:", rank)

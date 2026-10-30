@@ -14,7 +14,7 @@ import plugin
 from mnemosyne import Mnemosyne
 mark = os.environ["MARK"]
 eng = Mnemosyne()
-eng.remember("matrix marker " + mark + ", whiskey barrel aging chemistry", importance=0.9)
+eng.remember("matrix marker " + mark + ", whiskey barrel aging chemistry", importance=0.9, source="fact")
 hits = eng.recall("whiskey barrel aging chemistry", top_k=5)
 rank = next((i+1 for i,h in enumerate(hits) if mark in (h.get("content") or "")), None)
 print("hits:", len(hits), "rank:", rank)
