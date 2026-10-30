@@ -1889,6 +1889,7 @@ class Cursor:
             self.rowcount = -1
             return self
         sql_s = _rewrite_upsert(sql_s, self._conn)
+        sql_s = _dialect_rewrite.rewrite_dialect(sql_s)
         _had_bare_rowid = bool(re.search(r"(?<![\w.\"])rowid\b", sql_s))
         sql_s = _rowid_rewrite.rewrite_rowids(
             sql_s, _CURRENT_SCHEMA[0] or "", self._conn)
