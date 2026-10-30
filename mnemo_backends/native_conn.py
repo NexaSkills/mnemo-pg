@@ -1128,6 +1128,14 @@ def _load_contract_columns() -> None:
             "author_type", "channel_id", "trust_tier", "validator",
             "validated_at", "validation_count", "event_date",
             "event_date_precision", "temporal_tags", "corrected_by")),
+        # canonical.py's lazy CREATE only runs when the TABLE is absent;
+        # a legacy-lineage canonical_facts (native_ddl shape: profile_id,
+        # no owner_id) crashes every CanonicalStore call with
+        # UndefinedColumn(owner_id). kim 2026-10-30 proved the gap.
+        ("canonical_facts", (
+            "id", "owner_id", "category", "name", "body", "source",
+            "confidence", "version", "valid_from", "valid_until",
+            "writer_id", "writer_home")),
     )
 
 
