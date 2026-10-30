@@ -142,19 +142,18 @@ def install(provider_cls=None) -> bool:
     # 2b. bare Mnemosyne(db_path=None) resolves self.db_path from
     # _default_db_path() at call time in some builds and binds the function
     # directly in others; wrap the class property-safe accessor as well.
-    if provider_cls is None:
-        try:
-            from mnemosyne.core.memory import Mnemosyne as _M
-            _orig_init = _M.__init__
+    try:
+        from mnemosyne.core.memory import Mnemosyne as _M
+        _orig_init = _M.__init__
 
-            def __init__(self, db_path=None, *a, **kw):
-                if db_path is None:
-                    db_path = _default_lock_path()
-                return _orig_init(self, db_path, *a, **kw)
-            __init__.__name__ = "__init__"
-            _M.__init__ = __init__
-        except Exception:
-            pass
+        def __init__(self, *a, db_path=None, **kw):
+            if db_path is None:
+                db_path = _default_lock_path()
+            return _orig_init(self, *a, db_path=db_path, **kw)
+        __init__.__name__ = "__init__"
+        _M.__init__ = __init__
+    except Exception:
+        pass
 
     # 3. one-off sweep of pre-shim 0-byte residue
     try:
