@@ -88,6 +88,19 @@ def _sweep_residue() -> None:
         return
     moved = 0
     for f in out:
+        # NEVER delete a .db whose name contains 'mnemosyne': those are
+        # candidate store files that retire_check must classify (fresh =
+        # resurrection alarm, old = leftover) — deleting them here would
+        # blind the tripwire. Only lock sidecars are GC'd here.
+        if f.endswith(".db.init.lock"):
+            try:
+                os.makedirs(dest, exist_ok=True)
+                os.rename(f, os.path.join(
+                    dest, f.replace(os.sep, "_").lstrip("_")))
+                moved += 1
+            except OSError:
+                pass
+            continue
         if "/backups/" in f or "/staging/" in f or "/state-snapshots/" in f \
                 or "/cache/scratch/" in f or "/workspace/" in f \
                 or "/hermes-migration-" in f or ".retired-" in f:
@@ -105,8 +118,29 @@ def _sweep_residue() -> None:
             except OSError:
                 pass
         else:
-            log.error("mnemo-pg: LIVE sqlite store found outside PG routing: "
-                      "%s (%d bytes) — resurrection, investigate", f, sz)
+            # A non-empty .db somewhere under home is NOT proof of
+            # resurrection: an unrouted connect only touches the file
+            # (mtime ~now, never grows) — real writes dirty the -wal or
+            # bump the db mtime within seconds. Classify by movement;
+            # static files are retired leftovers that report RETIRED.
+            try:
+                st = os.stat(f)
+                moved_recently = (time.time() - st.st_mtime) < 120
+            except OSError:
+                continue
+            dirty = False
+            base = f[:-3] if f.endswith(("-wal", "-shm")) else f
+            for side in (base + "-wal", base + "-shm"):
+                try:
+                    if time.time() - os.stat(side).st_mtime < 120:
+                        dirty = True
+                        break
+                except OSError:
+                    pass
+            if moved_recently or dirty:
+                log.error("mnemo-pg: LIVE sqlite store found outside PG "
+                          "routing: %s (%d bytes) — resurrection, investigate",
+                          f, sz)
     if moved:
         log.info("mnemo-pg: swept %d 0-byte sqlite residue file(s) to %s",
                  moved, dest)
