@@ -44,6 +44,12 @@ SRC=""
 if [[ -d "$PLUGIN_DIR/.git" ]]; then
   SRC="$PLUGIN_DIR"
   log "fetch source: existing deploy repo $PLUGIN_DIR"
+  # self-heal a remote-less/partial git-init from an interrupted fresh clone
+  # (git-init happens BEFORE the clone can fail; the half state persisted)
+  if ! git -C "$PLUGIN_DIR" remote get-url origin >/dev/null 2>&1; then
+    git -C "$PLUGIN_DIR" remote add origin "$REMOTE" \
+      && log "added missing origin remote to $PLUGIN_DIR"
+  fi
 elif [[ -d "$DEV_REPO/.git" && "$PLUGIN_DIR" != "$DEV_REPO" ]]; then
   # materialize INTO plugin location from local clone (beez fast path; fleet hosts
   # have no DEV_REPO and fall through to a fresh clone)
