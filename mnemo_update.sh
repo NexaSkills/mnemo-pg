@@ -101,6 +101,32 @@ log "deployed code at $COMMIT in $PLUGIN_DIR"
     mkdir -p "$HERMES/backups"; run mv "$HERMES/plugins/mnemosyne" "$HERMES/backups/mnemosyne-dir-retired-$(date +%Y%m%d-%H%M%S)"; }
 [[ -e "$HERMES/plugins/mnemosyne" && ! -L "$HERMES/plugins/mnemosyne" ]] && die "cannot retire root plugins/mnemosyne"
 materialize_dir "$HERMES/plugins/mnemosyne"
+# G3 self-heal (Jan 2026-10-30): remove/quarantine any OLD sqlite mnemosyne
+# plugin residue BEFORE the next boot loads it — legacy plugin dirs (version
+# marker check), legacy installer metadata, and legacy plugins.enabled
+# entries are detected and moved out / reported. NEVER merely refuse to load.
+python3 "$PLUGIN_DIR/scripts/quarantine_legacy_plugin.py" \
+  || log "WARN: quarantine_legacy_plugin reported issues (see output above)"
+# hygiene: 0-byte sqlite probe artifacts from the provider's unrouted
+# read-only diagnostics connect (creates file, writes nothing) are moved to
+# backups/ so retire_check reports the TRUE state (real resurrection stays loud).
+python3 "$PLUGIN_DIR/scripts/quarantine_residual_sqlite.py" || true
+# install/refresh the SQLite-resurrection tripwire units (idempotent; the
+# service runs scripts/retire_check.py via a REPO path resolved from env).
+TW_DIR="$HOME/.config/systemd/user"
+if [[ -f "$PLUGIN_DIR/ops/mnemo-sqlite-tripwire.service" ]]; then
+  mkdir -p "$TW_DIR"
+  for u in mnemo-sqlite-tripwire.service mnemo-sqlite-tripwire.timer; do
+    src="$PLUGIN_DIR/ops/$u"
+    dst="$TW_DIR/$u"
+    if [[ ! -e "$dst" || "$(cat "$dst")" != "$(cat "$src")" ]]; then
+      run cp -f "$src" "$dst" && log "tripwire unit refreshed: $u"
+    fi
+  done
+  run systemctl --user daemon-reload
+  run systemctl --user enable --now mnemo-sqlite-tripwire.timer
+  SOURCES+=("tripwire: mnemo-sqlite-tripwire.timer enabled")
+fi
 for d in "$HERMES"/profiles/*/; do
   p=$(basename "$d"); [[ -d "$d" ]] || continue
   mkdir -p "$d/plugins"

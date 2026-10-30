@@ -51,9 +51,29 @@ def backend_for() -> str:
 def _pg_dsn() -> str:
     dsn = os.environ.get("MNEMO_PG_DSN")
     if not dsn:
-        home = os.environ.get("HERMES_HOME") or os.path.expanduser("~/.hermes")
-        p = Path(home)
-        for cand in [p, *p.parents]:
+        # Mirror check_all.dsn(): walk up from HERMES_HOME reading the
+        # MNEMO_PG_DSN= lines in .env files, then fall back to the fleet
+        # cluster convention (private PG beside the shared ~/.hermes root,
+        # socket dir ~/lcm-pg/run, port 54329, role lcm01). The old walk
+        # never looked in the ~/.hermes root itself: a process whose env
+        # carries only a profile-dir HERMES_HOME and no inherited DSN
+        # (nohup/setsid/detached contexts) resolved the dsn to None and
+        # sqlite3.connect silently RESURRECTED <home>/mnemosyne/data/
+        # mnemosyne.db instead of failing (audit_log incident, 2026-10-30
+        # 08:47:48). With a routeable DSN, NativeConn fails LOUD instead.
+        roots: list[Path] = []
+        home_env = os.environ.get("HERMES_HOME") or os.path.expanduser("~/.hermes")
+        p = Path(home_env)
+        roots.extend([p, *p.parents])
+        roots.append(Path.home() / ".hermes")
+        seen_roots: set[Path] = set()
+        for cand in roots:
+            try:
+                if cand in seen_roots:
+                    continue
+                seen_roots.add(cand)
+            except TypeError:
+                pass
             env = cand / ".env"
             if env.is_file():
                 for line in env.read_text().splitlines():
@@ -150,15 +170,15 @@ def _ensure_date_fns(base) -> None:
         # string that only provisions at creation time.
         try:
             bad = base.execute(
-                "SELECT p.oid FROM pg_proc p "
-                "JOIN pg_namespace n ON n.oid=p.pronamespace "
+                "SELECT p.oid FROM pg_catalog.pg_proc p "
+                "JOIN pg_catalog.pg_namespace n ON n.oid=p.pronamespace "
                 "WHERE n.nspname=current_schema() AND p.proname='date' "
                 "AND p.pronargs=1 AND pg_get_function_arguments(p.oid) "
                 "ILIKE '%text%' "
                 "AND prosrc LIKE '%to_timestamp%' "
                 "AND prosrc NOT LIKE '%pg_catalog%' "
-                "AND NOT EXISTS (SELECT 1 FROM pg_proc q "
-                "  JOIN pg_namespace m ON m.oid=q.pronamespace "
+                "AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_proc q "
+                "  JOIN pg_catalog.pg_namespace m ON m.oid=q.pronamespace "
                 "  WHERE m.nspname=current_schema() AND q.proname='to_timestamp')",
             ).fetchone()
             if bad:

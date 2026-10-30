@@ -40,9 +40,17 @@ def _table_exists(schema: str, table: str, conn) -> bool:
     if hit is not None:
         return hit
     try:
+        # pg_catalog MUST be qualified: callers may sit on a connection whose
+        # search_path was pinned to the profile schema alone (probe scripts
+        # DO `SET search_path TO mnemosyne_<p>` with no trailing `public`),
+        # and then even pg_catalog-only relations like pg_class/pg_attribute
+        # are looked up as mnemosyne_<p>.pg_class — see the ~30/day server
+        # errors `relation "mnemosyne_mike.pg_attribute" does not exist`.
+        # The exception branch fail-louds (ok=True, SQL untouched), so this
+        # is log-noise + silent rewrite skip, not data corruption.
         row = conn.execute(
-            "SELECT 1 FROM pg_class WHERE oid = "
-            "cast(%s || '.' || %s as regclass) LIMIT 1",
+            "SELECT 1 FROM pg_catalog.pg_class WHERE oid = "
+            "cast(%s || '.' || %s as pg_catalog.regclass) LIMIT 1",
             (schema, table)).fetchone()
         ok = row is not None
     except Exception:
@@ -58,9 +66,13 @@ def _table_has_real_rowid(schema: str, table: str, conn) -> bool:
         return hit
     ok = False
     try:
+        # pg_catalog MUST be qualified: callers may sit on a connection whose
+        # search_path was pinned to the profile schema alone (unqualified
+        # pg_attribute then raises `relation "mnemosyne_<p>.pg_attribute"
+        # does not exist` server-side, the fail-loud branch below).
         row = conn.execute(
-            "SELECT 1 FROM pg_attribute WHERE attrelid = "
-            "cast(%s || '.' || %s as regclass) AND attname = 'rowid' "
+            "SELECT 1 FROM pg_catalog.pg_attribute WHERE attrelid = "
+            "cast(%s || '.' || %s as pg_catalog.regclass) AND attname = 'rowid' "
             "AND attnum > 0 AND NOT attisdropped", (schema, table)).fetchone()
         ok = row is not None
     except Exception:

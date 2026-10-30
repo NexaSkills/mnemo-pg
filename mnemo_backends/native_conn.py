@@ -172,14 +172,14 @@ def _pragma(conn, sql: str):
             "  CASE WHEN a.attnotnull THEN 1 ELSE 0 END, "
             "  pg_get_expr(d.adbin, d.adrelid) AS dflt, "
             "  CASE WHEN k.pkcol = a.attnum THEN 1 ELSE 0 END AS pkflag "
-            "FROM pg_class c "
-            "JOIN pg_namespace ns ON ns.oid = c.relnamespace "
-            "JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum > 0 "
+            "FROM pg_catalog.pg_class c "
+            "JOIN pg_catalog.pg_namespace ns ON ns.oid = c.relnamespace "
+            "JOIN pg_catalog.pg_attribute a ON a.attrelid = c.oid AND a.attnum > 0 "
             "  AND NOT a.attisdropped "
-            "LEFT JOIN pg_attrdef d ON d.adrelid = c.oid AND d.adnum = a.attnum "
+            "LEFT JOIN pg_catalog.pg_attrdef d ON d.adrelid = c.oid AND d.adnum = a.attnum "
             "LEFT JOIN LATERAL ("
             "  SELECT (i.indkey::int2[])[1]::int AS pkcol "
-            "  FROM pg_index i WHERE i.indrelid = c.oid AND i.indisprimary "
+            "  FROM pg_catalog.pg_index i WHERE i.indrelid = c.oid AND i.indisprimary "
             "  LIMIT 1) k ON true "
             "WHERE ns.nspname = current_schema() AND c.relname = %s "
             "ORDER BY a.attnum", (arg,)).fetchall()
@@ -222,8 +222,8 @@ def _pragma(conn, sql: str):
         # cheap real probe: every base relation in the schema must have a
         # live storage fork (a torn relation fails this), not a constant ok
         p.execute(
-            "SELECT 1 FROM pg_class c "
-            "JOIN pg_namespace n ON n.oid=c.relnamespace "
+            "SELECT 1 FROM pg_catalog.pg_class c "
+            "JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace "
             "WHERE n.nspname=current_schema() AND c.relkind='r' "
             "AND pg_relation_size(c.oid) >= 0 LIMIT 1").fetchall()
         return _RowCursor(["integrity_check"], [("ok",)])
@@ -250,7 +250,7 @@ def _pragma(conn, sql: str):
         rows = p.execute(
             "SELECT c.relname, "
             "CASE WHEN c.relkind='v' THEN 'view' ELSE 'table' END "
-            "FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace "
+            "FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace "
             "WHERE n.nspname=current_schema() AND c.relkind IN ('r','p','v') "
             "ORDER BY c.oid").fetchall()
         return _RowCursor(["seq", "name", "type"],
@@ -267,12 +267,12 @@ def _pragma(conn, sql: str):
             "  CASE con.confdeltype WHEN 'a' THEN 'NO ACTION' "
             "    WHEN 'r' THEN 'RESTRICT' WHEN 'c' THEN 'CASCADE' "
             "    WHEN 'n' THEN 'SET NULL' WHEN 'd' THEN 'SET DEFAULT' END "
-            "FROM pg_constraint con "
-            "JOIN pg_class c ON c.oid = con.conrelid "
-            "JOIN pg_class refc ON refc.oid = con.confrelid "
-            "JOIN pg_attribute sa ON sa.attrelid = c.oid "
+            "FROM pg_catalog.pg_constraint con "
+            "JOIN pg_catalog.pg_class c ON c.oid = con.conrelid "
+            "JOIN pg_catalog.pg_class refc ON refc.oid = con.confrelid "
+            "JOIN pg_catalog.pg_attribute sa ON sa.attrelid = c.oid "
             "  AND sa.attnum = con.conkey[1] "
-            "JOIN pg_attribute ra ON ra.attrelid = refc.oid "
+            "JOIN pg_catalog.pg_attribute ra ON ra.attrelid = refc.oid "
             "  AND ra.attnum = con.confkey[1] "
             "WHERE con.contype='f' AND (c.relname = %s OR refc.relname = %s) "
             "ORDER BY con.oid", (arg, arg)).fetchall()
@@ -472,9 +472,9 @@ _SQLITE_MASTER_VEC_SQL = (
     "THEN 'CREATE TABLE ' || chr(34) || '@TABLE@' || chr(34) "
     "|| ' (embedding FLOAT[' "
     "|| (SELECT substring(format_type(a.atttypid, a.atttypmod) from "
-    "'vector\\((\\d+)\\)') FROM pg_attribute a "
+    "'vector\\((\\d+)\\)') FROM pg_catalog.pg_attribute a "
     "WHERE a.attrelid = cast(current_schema() || "
-    "chr(46) || '@TABLE@' as regclass) AND a.attname = 'embedding') "
+    "chr(46) || '@TABLE@' as pg_catalog.regclass) AND a.attname = 'embedding') "
     "|| '])' /*float32*/ END AS sql")
 
 
@@ -1082,8 +1082,8 @@ def _companion_is_vector(table: str) -> bool:
     if hit is not None:
         return hit
     ok = False
-    q = ("SELECT format_type(a.atttypid, NULL) FROM pg_attribute a"
-         " WHERE a.attrelid = cast(%s || '.' || %s as regclass)"
+    q = ("SELECT format_type(a.atttypid, NULL) FROM pg_catalog.pg_attribute a"
+         " WHERE a.attrelid = cast(%s || '.' || %s as pg_catalog.regclass)"
          " AND a.attname = 'embedding' AND a.attnum > 0")
     try:
         schema = _CURRENT_SCHEMA[0] or _active_schema()
@@ -1612,12 +1612,12 @@ def _unique_cols(table: str, conn=None) -> list:
         # the param renderer — use cast(...) form instead.
         q = ("SELECT i.indisunique, i.indisprimary, "
              " array_agg(a.attname ORDER BY x) "
-             "FROM pg_index i "
+             "FROM pg_catalog.pg_index i "
              "JOIN LATERAL unnest(i.indkey) WITH ORDINALITY AS x(attnum, ord) "
              "  ON true "
-             "JOIN pg_attribute a ON a.attrelid = i.indrelid "
+             "JOIN pg_catalog.pg_attribute a ON a.attrelid = i.indrelid "
              "  AND a.attnum = x.attnum "
-             "WHERE i.indrelid = cast(%s || '.' || %s as regclass) "
+             "WHERE i.indrelid = cast(%s || '.' || %s as pg_catalog.regclass) "
              "GROUP BY i.indexrelid, i.indisunique, i.indisprimary "
              "ORDER BY i.indisprimary DESC")
         if conn is not None:
@@ -2261,9 +2261,9 @@ class NativeConn:
         col = None
         try:
             r = self._raw.execute(
-                "SELECT a.attname FROM pg_attribute a "
-                "JOIN pg_class c ON c.oid = a.attrelid "
-                "JOIN pg_namespace n ON n.oid = c.relnamespace "
+                "SELECT a.attname FROM pg_catalog.pg_attribute a "
+                "JOIN pg_catalog.pg_class c ON c.oid = a.attrelid "
+                "JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace "
                 "WHERE n.nspname = current_schema() AND c.relname = %s "
                 "AND a.attidentity IN ('a','b') AND a.attnum > 0 "
                 "ORDER BY a.attnum LIMIT 1", (table,)).fetchone()
