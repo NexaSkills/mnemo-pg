@@ -58,6 +58,20 @@ def _default_lock_path() -> str:
     return os.path.join(cache, "mnemo-pg", "locks", schema, "store.pg")
 
 
+def _pin_data_dir_env() -> None:
+    """MNEMOSYNE_DATA_DIR pins _default_data_dir() in every vendored module
+    to a sqlite-SHAPED path inside a neutral dir. Connects through ANY
+    route (even a module whose globals the loader never bound) land on a
+    path that factory converts to PG, so no store file ever materialises.
+    Lock sidecars live next to it; sweep exclusions cover the tree."""
+    home = os.environ.get("HERMES_HOME") or os.path.expanduser("~/.hermes")
+    ddir = os.path.join(home, "mnemo-pg", "data")
+    # mnemosyne.db (store-shaped) so ANY unrouted connect hits the
+    # name-based converter; the dir itself must NOT contain "lcm" and the
+    # name is not "shared" so schema stays profile-derived in factory.
+    os.environ.setdefault("MNEMOSYNE_DATA_DIR", ddir)
+
+
 def _sweep_residue() -> None:
     """Move 0-byte mnemosyne.db*/lcm.db* residue under HOME to backups."""
     home = os.path.expanduser("~")
@@ -110,6 +124,13 @@ def install(provider_cls=None) -> bool:
         return False
 
     import pathlib
+
+    # 0. pin the default data dir env so even unrouted module globals
+    # resolve to a store-shaped path that the converter turns into PG.
+    try:
+        _pin_data_dir_env()
+    except Exception:
+        pass
 
     # 1. shared surface path on the provider class
     if provider_cls is not None:
