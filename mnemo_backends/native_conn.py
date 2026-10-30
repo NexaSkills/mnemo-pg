@@ -39,6 +39,7 @@ import psycopg.sql as psql
 from . import params as _params
 from . import fts_rewrite as _fts_rewrite
 from . import rowid_rewrite as _rowid_rewrite
+from . import dialect_rewrite as _dialect_rewrite
 
 
 # ---------------------------------------------------------------------------
