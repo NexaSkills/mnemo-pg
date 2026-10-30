@@ -34,6 +34,27 @@ from psycopg import sql as psql_sql
 _SCHEMA_RE = re.compile(r"[a-z][a-z0-9_]{0,62}")
 
 
+def _nullable_relax_stmts(schema: str) -> list[str]:
+    """Relax NOT NULL on legacy-lineage columns the vendored core's
+    canonical INSERT never supplies (profile_id on kim's legacy
+    canonical_facts 2026-10-30; updated_at handled in fix_statements).
+    Relaxation only; existing rows untouched; guarded no-op elsewhere."""
+    return [
+        "DO $$"
+        "BEGIN"
+        " IF EXISTS (SELECT 1 FROM pg_attribute a"
+        "     JOIN pg_class c ON c.oid=a.attrelid"
+        "     JOIN pg_namespace n ON n.oid=c.relnamespace"
+        f"    WHERE n.nspname='{schema}' AND c.relname='canonical_facts'"
+        "      AND a.attname='profile_id' AND a.attnum>0 AND a.attnotnull)"
+        " THEN"
+        "   EXECUTE 'ALTER TABLE " + schema + ".canonical_facts"
+        "     ALTER COLUMN profile_id DROP NOT NULL';"
+        " END IF;"
+        "END$$",
+    ]
+
+
 def fix_statements(schema: str) -> list[str]:
     if not _SCHEMA_RE.fullmatch(schema):
         raise SystemExit(f"unsafe schema name: {schema}")
@@ -153,23 +174,3 @@ def main() -> int:
 if __name__ == "__main__":
     raise SystemExit(main())
 
-
-def _nullable_relax_stmts(schema: str) -> list[str]:
-    """Relax NOT NULL on legacy-lineage columns the vendored core's
-    canonical INSERT never supplies (profile_id on kim's legacy
-    canonical_facts 2026-10-30; updated_at handled in fix_statements).
-    Relaxation only; existing rows untouched; guarded no-op elsewhere."""
-    return [
-        "DO $$"
-        "BEGIN"
-        " IF EXISTS (SELECT 1 FROM pg_attribute a"
-        "     JOIN pg_class c ON c.oid=a.attrelid"
-        "     JOIN pg_namespace n ON n.oid=c.relnamespace"
-        f"    WHERE n.nspname='{schema}' AND c.relname='canonical_facts'"
-        "      AND a.attname='profile_id' AND a.attnum>0 AND a.attnotnull)"
-        " THEN"
-        "   EXECUTE 'ALTER TABLE " + schema + ".canonical_facts"
-        "     ALTER COLUMN profile_id DROP NOT NULL';"
-        " END IF;"
-        "END$$",
-    ]
