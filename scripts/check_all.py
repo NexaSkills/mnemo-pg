@@ -13,6 +13,8 @@ Exit 0 = no FAIL rows.
 from __future__ import annotations
 import os as _os, sys as _sys
 _sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
+from mnemo_backends import psycopg_site as _ps
+_ps.ensure_psycopg()   # hosts keep psycopg only in the lcm-pg private venv
 
 import os
 import pathlib
