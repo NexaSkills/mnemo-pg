@@ -96,20 +96,22 @@ def _append_psycopg_site() -> None:
 
 def _bootstrap() -> None:
     repo = _HERE.parent if (_HERE.parent / "mnemo_backends").is_dir() else _HERE
-    for p in (str(repo), str(_vendor_dir())):
+    for p in (str(repo), str(_HERE), str(_vendor_dir())):
         if p not in sys.path:
             sys.path.insert(0, p)
     _shadow_site_packages()
     _append_psycopg_site()
     try:
-        import _neutralize_legacy
-
-        _neutralize_legacy.neutralize()
-    except BaseException as exc:
+        from mnemo_backends import neutralize_legacy as _nl
+    except ImportError:
+        import _neutralize_legacy as _nl  # repo checkout layout
+    try:
         # The legacy pip provider `mnemosyne_hermes` must never serve agent
         # tool calls alongside mnemo-pg (G3). Neutralization failures must
         # not break the boot — the binding sweep is the second line of
         # defence, but surface it loudly in the log.
+        _nl.neutralize()
+    except BaseException as exc:
         print(f"[mnemosyne] legacy-provider neutralizer skipped: {exc}",
               file=sys.stderr)
 
