@@ -4,6 +4,10 @@
 Usage: check_vec_coverage.py [--all | <schema> ...]
 Exit 0 if every schema is fully covered, 1 otherwise.
 """
+import os as _os, sys as _sys
+_sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
+from mnemo_backends import psycopg_site as _ps
+_ps.ensure_psycopg()   # fleet hosts keep psycopg in the lcm-pg private venv
 import os, sys, psycopg
 
 PAIRS = (

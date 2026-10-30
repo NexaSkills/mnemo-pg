@@ -162,6 +162,22 @@ for unit in "$HERMES"/../.config/systemd/user/hermes-*.service.d/*mnemo-poly*.co
 done
 run systemctl --user daemon-reload || true
 
+# ------------------------------------------------------- 3.5 PROVISION
+# Ensure a PG schema exists for every profile + shared BEFORE any process
+# boots against it (check_all gates on exactly these). Idempotent; never
+# drops data. --all covers existing mnemosyne* schemas; profile names
+# derive from the profiles dir (host-agnostic).
+SCHEMAS=("mnemosyne_shared")
+for d in "$HERMES"/profiles/*/; do
+  [[ -d "$d" ]] || continue
+  p=$(basename "$d" | tr 'A-Z-' 'a-z_')
+  SCHEMAS+=("mnemosyne_$p")
+done
+[[ -d "$HERMES" ]] && SCHEMAS+=("mnemosyne_default")
+python3 "$PLUGIN_DIR/scripts/provision_schema.py" "${SCHEMAS[@]}" \
+  && SOURCES+=("provision: ${SCHEMAS[*]}") \
+  || log "WARN: provision_schema failed for ${SCHEMAS[*]}"
+
 # ---------------------------------------------------------- 4. RESTARTS
 SURFACES=()
 if [[ $NORESTART -eq 0 && $DRY -eq 0 ]]; then
