@@ -135,6 +135,22 @@ try:
     except BaseException as exc:
         print(f"[mnemosyne] json-safe reply wrapper skipped: {exc}",
               file=sys.stderr)
+    # Jan 2026-10-30: sqlite is CONVERTED to native PostgreSQL, never used.
+    # Backstop for connects issued outside the bound modules, plus the two
+    # filesystem-path doors (shared surface / default lock) that skip
+    # connect() entirely.
+    try:
+        from mnemo_backends import sqlite_to_pg as _s2p
+        _s2p.install()
+    except BaseException as exc:
+        print(f"[mnemosyne] sqlite->pg backstop skipped: {exc}",
+              file=sys.stderr)
+    try:
+        from mnemo_backends import shared_surface_pg as _sp
+        _sp.install(getattr(_upstream, "MnemosyneMemoryProvider", None))
+    except BaseException as exc:
+        print(f"[mnemosyne] shared-surface pg shim skipped: {exc}",
+              file=sys.stderr)
 except Exception as exc:  # pragma: no cover
     _BOOT_ERROR = f"{type(exc).__name__}: {exc}"
 
