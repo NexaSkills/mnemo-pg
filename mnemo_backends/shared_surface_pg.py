@@ -53,9 +53,15 @@ def _shared_pg_path() -> str:
 
 
 def _default_lock_path() -> str:
-    cache = os.environ.get("XDG_CACHE_HOME") or os.path.expanduser("~/.cache")
+    """Lock sidecar path. Must stay under HERMES_HOME (never ~/.cache):
+    gateway processes run with XDG_CACHE_HOME redirected (profile cache
+    dirs), and a path outside HERMES_HOME escapes the path-based schema
+    resolver in factory._store_schema — it would fall back to whichever
+    profile HERMES_HOME names (or mnemosyne_default), NOT the profile
+    actually initialising, and write DDL into the wrong schema."""
+    home = os.environ.get("HERMES_HOME") or os.path.expanduser("~/.hermes")
     schema = os.environ.get("MNEMO_PG_SCHEMA", "default")
-    return os.path.join(cache, "mnemo-pg", "locks", schema, "store.pg")
+    return os.path.join(home, "mnemo-pg", "locks", schema, "store.pg")
 
 
 def _pin_data_dir_env() -> None:
