@@ -1956,9 +1956,17 @@ class Cursor:
         # Skip if the SELECT list already carries an explicit rowid alias
         # (callers like `SELECT working_memory__rowid AS rowid ...` would
         # otherwise get a double alias: `x AS "rowid" AS working_memory__rowid`).
+        # A rowid reference inside an EXISTS(...) sub-referencing the OUTER
+        # table is also not a projected column of this statement, so no
+        # alias is due there either (and adding one corrupts the predicate:
+        # `WHERE working_memory__rowid AS "rowid" = ...` -> PG syntax error).
+        _subquery_ref = re.search(
+            r"\b(?:EXISTS|IN|NOT\s+IN)\s*\(\s*(?:SELECT|WITH)\b", native, re.I)
         if (_rid_alias
                 and _had_bare_rowid
                 and not _rid_alias.group(1).lower().startswith("vec_")
+                and not (_subquery_ref
+                         and _subquery_ref.start() > _rid_alias.start())
                 and not re.search(
                     r"(?i)\bas\s+\"?rowid\"?\b",
                     native[:_rid_alias.start()])):
