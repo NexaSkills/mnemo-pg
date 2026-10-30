@@ -15,7 +15,7 @@ import os
 os.environ["HERMES_HOME"]=os.environ["MNEMO_PROBE_HOME"]
 os.environ["MNEMOSYNE_POLYPHONIC_RECALL"]="1"
 mark=os.environ["MNEMO_PROBE_MARK"]
-import mnemo_backends.install as _i
+import mnemo_backends as _i
 _i.install()
 from mnemosyne.core.memory import Mnemosyne
 eng=Mnemosyne(db_path=os.environ["MNEMO_PROBE_HOME"]+"/mnemosyne/data/mnemosyne.db")

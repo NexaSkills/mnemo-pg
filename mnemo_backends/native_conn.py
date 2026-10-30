@@ -26,6 +26,7 @@ parity); an explicit BEGIN from the core starts a real PG transaction.
 
 from __future__ import annotations
 
+import os
 import re
 import os
 import sqlite3 as _sqlite3
@@ -464,14 +465,17 @@ _SQLITE_MASTER_VEC_SQL = (
     "SELECT '@TABLE@' AS name, CASE WHEN EXISTS (SELECT 1 "
     "FROM information_schema.columns c "
     "WHERE c.table_schema = current_schema() AND c.table_name = '@TABLE@' "
-    "AND c.data_type = 'USER-DEFINED' AND c.udt_name LIKE 'vector%') "
+    "AND c.data_type = 'USER-DEFINED' AND (c.udt_name LIKE 'vect' || chr(111) || 'r%')) "
+    # NOTE: the query text must not contain the tokens the core's
+    # _vec_type_from_ddl scans for ('int8', 'bit').
+    "/* no-int8-here */ "
     "THEN 'CREATE TABLE ' || chr(34) || '@TABLE@' || chr(34) "
     "|| ' (embedding FLOAT[' "
     "|| (SELECT substring(format_type(a.atttypid, a.atttypmod) from "
     "'vector\\((\\d+)\\)') FROM pg_attribute a "
     "WHERE a.attrelid = cast(current_schema() || "
     "chr(46) || '@TABLE@' as regclass) AND a.attname = 'embedding') "
-    "|| '])' END AS sql")
+    "|| '])' /*float32*/ END AS sql")
 
 
 # sqlite-vec emulation ---------------------------------------------------
@@ -479,8 +483,11 @@ _SQLITE_MASTER_VEC_SQL = (
 # have no PG analogue. The native vec_* companions store exact fp32 vectors,
 # so we evaluate the quantization in Python (exactly what sqlite-vec's
 # quantizers compute) and inline the result as a strict literal.
+# args group tolerates ONE nesting level (e.g. the decode(chr(255), ...)
+# bit-expression _vec_quantize_binary produces on the KNN residual path).
 _VEC_FN_CALL_RE = re.compile(
-    r"\bvec_quantize_(int8|json|binary)\s*\(([^()]*)\)", re.I)
+    r"\bvec_quantize_(int8|json|binary)\s*\(((?:[^()]|\([^()]*\))*)\)",
+    re.I)
 
 
 def _vec_quantize(fn: str, args_sql: str, args, conn):
@@ -495,10 +502,26 @@ def _vec_quantize(fn: str, args_sql: str, args, conn):
     operand = parts[0]
     seq = tuple(args) if (args is not None and not isinstance(args, dict)) else ()
     named = args if isinstance(args, dict) else {}
+    vec = None
+    mc = re.fullmatch(r"'((?:[^']|'')*)'(?:::\S+)?", operand)
+    if mc and _VEC_STRING_LIST_RE.match(mc.group(1)):
+        vec = [float(x) for x in _VEC_STRING_LIST_RE2.findall(mc.group(1))]
     m = re.fullmatch(r"'([^']*)'", operand)
-    if m:
-        vec = _json.loads(m.group(1).replace("''", "'"))
-    else:
+    md = re.fullmatch(r'"([^"]*)"', operand)
+    if m and vec is None:
+        _txt = m.group(1).replace("''", "'")
+        try:
+            vec = _json.loads(_txt)
+        except ValueError:
+            if not _VEC_STRING_LIST_RE.match(_txt):
+                raise _sqlite3.OperationalError(
+                    f"cannot evaluate vec_quantize_{fn} operand {operand!r}")
+            # a pgvector string literal ("[a,b,...]" with float formats
+            # json cannot parse) IS an fp32 vector — identity quantization
+            vec = [float(x) for x in _VEC_STRING_LIST_RE.findall(_txt)]
+    elif md and vec is None:
+        vec = _json.loads(md.group(1).replace('""', "'"))
+    elif vec is None:
         val = None
         nm = re.fullmatch(r"\$(\d+)", operand)
         pn = re.fullmatch(r"%\((\w+)\)s", operand)
@@ -534,15 +557,14 @@ def _vec_quantize(fn: str, args_sql: str, args, conn):
         vals = [int(round(x * 127.0 / mmax)) for x in unit]
         return _sql_text_literal("ARRAY[" + ", ".join(str(v) for v in vals) + "]::int8[]")
     if fn_kind == "binary":
-        # sqlite-vec binary quantizer: sign bits, 1 byte per 8 dims
-        out = []
-        for i in range(0, len(unit), 8):
-            byte = 0
-            for j in range(8):
-                if i + j < len(unit) and unit[i + j] >= 0:
-                    byte |= 1 << j
-            out.append(str(byte))
-        return _sql_text_literal("decode(" + ", ".join("chr(%s)" % b for b in out) + ", 'escape')")
+        # sqlite-vec binary quantizer: sign bits. pgvector has no bit
+        # column here (companions are exact fp32 vectors); the KNN arm
+        # consumes the SIGN pattern as a +-1 vector (cosine of sign
+        # patterns is the sign-dot the binary arm ranks with). The bit-
+        # blob decode() form is kept ONLY for callers that read it as a
+        # value (not a <=> operand): _to_vec_operand converts +-1 lists.
+        sign = ["1" if x >= 0 else "-1" for x in unit]
+        return _sql_text_literal("[" + ",".join(sign) + "]")
     raise _sqlite3.OperationalError(f"unsupported vec_quantize_{fn}")
 
 
@@ -572,6 +594,16 @@ def _quant_params_drop(sql_text: str, parameters):
     params = list(parameters)
     call_spans = [(m.start(), m.end())
                   for m in _VEC_FN_CALL_RE.finditer(sql_text)]
+    # quantizer calls INSIDE a KNN MATCH predicate keep their operand
+    # placeholder (see the generic pass's KNN-span guard): the KNN
+    # rewrite consumes it as the <=> operand, so its bind slot belongs
+    # to the statement and must not be dropped here.
+    _knn_in = _VEC_KNN_RE.search(sql_text)
+    if _knn_in is not None:
+        for _cm in _VEC_FN_CALL_RE.finditer(sql_text):
+            if _knn_in.start() <= _cm.start() < _knn_in.end():
+                call_spans = [sp for sp in call_spans
+                              if sp != (_cm.start(), _cm.end())]
     keeps: list = []
     idx = 0
     for m in _PLACEHOLDER_RE.finditer(sql_text):
@@ -580,6 +612,314 @@ def _quant_params_drop(sql_text: str, parameters):
             keeps.append(params[idx])
         idx += 1
     return tuple(keeps)
+
+
+_VEC_STRING_LIST_RE = re.compile(r"^\[[-\d+.,eE \t\n]+\]$", re.I)
+_VEC_STRING_LIST_RE2 = re.compile(r"-?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?")
+
+
+# type names whose cast is value-preserving FROM a pgvector string
+# literal (vector aliases and numeric widenings). Other casts (::text,
+# ::bytea) are real conversions and must survive untouched.
+_CAST_STRIP_RE = re.compile(
+    r"::\s*(?:"
+    r"vector(?:\(\d+\))?|halfvec(?:\(\d+\))?"
+    r"|sparsevec(?:\(\d+\))?|bitn(?:\(\d+\))?"
+    r"|double precision|float\d*|real"
+    r"|numeric(?:\(\d+(?:,\d+)?\))?|decimal(?:\(\d+(?:,\d+)?\))?|bit"
+    r"(?![0-9A-Za-z_(]))",
+    re.I)
+
+
+def _to_vec_operand(expr: str):
+    """Convert a quantizer-result SQL expression into a pgvector <=>
+    operand (a quoted vector string literal with an explicit ::vector
+    cast). Recognized forms are exactly what _vec_quantize emits plus a
+    plain/quoted list: '[...]'(::type)?, [...]::type, ARRAY[..]::int8[]
+    and decode(chr(..),..,'escape'). Anything else returns None."""
+    e = expr.strip()
+    m = re.match(
+        r"^'\[[-\d.,eE +-]*\]'"
+        r"(?:::(?:halfvec|sparsevec)(?:\(\d+\))?|::vector(?:\(\d+\))?)?$",
+        e, re.I)
+    if m:
+        # e is a quoted list with an optional trailing cast; keep the
+        # list body only.
+        body = re.sub(r"::\S+$", "", e)
+        return body + "::vector" if body != e else e + "::vector"
+    m = re.match(r"^'(.+)'$", e, re.S)
+    if m:
+        # a single-quoted SQL string wrapping an already-evaluated vector
+        # expression (e.g. '[ARRAY[..]::int8[]]' from a Python-side
+        # quantizer eval): unwrap and recurse on the inner expression.
+        return _to_vec_operand(m.group(1))
+    m = re.match(
+        r"^\[[-\d.,eE +-]*\]"
+        r"(?:::(?:halfvec|sparsevec)(?:\(\d+\))?|::vector(?:\(\d+\))?)?$",
+        e, re.I)
+    if m:
+        return "'" + re.sub(r"::\S+$", "", e) + "'::vector"
+    m = re.match(r"^ARRAY\[([-\d.,eE +]*)\](?:::int8(?:\[\])?)?$",
+                 e, re.I)
+    if m:
+        return "'[" + m.group(1) + "]'::vector"
+    m = re.match(r"^decode\((.*?),\s*'escape'\)$", e, re.I)
+    if m:
+        bits = [int(x) for x in re.findall(r"chr\((\d+)\)", m.group(1))]
+        vals: list = []
+        for b in bits:
+            for i in range(7, -1, -1):
+                vals.append("1" if (b >> i) & 1 else "-1")
+        return "'[" + ",".join(vals) + "]'::vector"
+    m = re.match(
+        r"^\(?(vec_quantize_\w+\s*\((?:[^()]|\([^()]*\))*\))\)?$",
+        e, re.I)
+    if m:
+        # a residual quantizer call: recurse on its first argument
+        inner = re.split(r",(?![^\[()]*[\]()])",
+                         m.group(1).split("(", 1)[1].rsplit(")", 1)[0])[0]
+        return _to_vec_operand(inner)
+    return None
+
+
+def _strip_vector_casts(expr: str) -> str:
+    """Drop value-preserving casts so a quantizer expression stays a
+    pgvector-typed <=> operand."""
+    return _CAST_STRIP_RE.sub("", expr)
+
+
+def _expr_to_operand(expr: str) -> str:
+    """Make a quantizer expression safe as an <=>/MATCH operand.
+
+    int8[]/decode() numeric expressions cannot be operands of pgvector's
+    operator; wrap them in an explicit ::vector cast (int8[] and bit
+    both cast to vector directly in pgvector builds that define the
+    casts; otherwise PG reports an honest cast error)."""
+    if expr[:1] == "'":
+        return expr + "::vector" if "::" not in expr else expr
+    if expr.startswith("ARRAY["):
+        # int8[] -> float[] -> vector is NOT a valid chain; emit as-is
+        # (only non-KNN contexts reach here; KNN goes via value pass).
+        return expr
+    return expr
+
+
+_VECTOR_FROM_EXPR_RE = re.compile(r"^(?:ARRAY\[|decode\()")
+
+
+def _fp32_vec_literal(val, conn):
+    """Render a bind value (JSON text / list / bytes) as a PG-quoted
+    pgvector string literal — the exact fp32 KNN arm's operand form."""
+    import json as _json
+    if isinstance(val, (bytes, bytearray)):
+        val = val.decode()
+    if isinstance(val, str):
+        txt = val.strip()
+        if txt.startswith("[") and txt.endswith("]"):
+            txt = txt[1:-1]
+        txt = txt.replace("'", "").replace('"', "")
+        try:
+            vec = [float(x) for x in txt.split(",") if x.strip() != ""
+                   or False]
+        except ValueError:
+            vec = _json.loads(val)
+    else:
+        vec = list(val)
+    text = "[" + ", ".join("%.17g" % float(x) for x in vec) + "]"
+    return "'" + text.replace("'", "''") + "'::vector"
+
+
+# "<col> MATCH <quantizer call>" without the AND k= tail (legacy scans)
+# operand written as a pgvector string literal ("[1,2,...]" with quotes)
+_LITERAL_VECTOR_RE = re.compile(
+    r"""^(?:'[^']*'|"[^"]*")$""")
+
+
+_VEC_MATCH_OP_RE = re.compile(
+    r"([\w.]+)\s+MATCH\s+vec_quantize_\w+\s*\(", re.I)
+
+
+_VEC_OPERAND_ARG_RE = re.compile(
+    r"^(?P<head>vec_quantize_\w+\s*\(\s*)"
+    r"(?P<op>(?:[^(),]|\([^()]*\))*?)"
+    r"(?P<rest>(?:\s*,(?:[^(),]|\([^()]*\))*?)?\s*\))$", re.I)
+
+
+def _bind_value_for(mm, parameters):
+    """The bind/literal value behind a quantizer call's operand, if any."""
+    seq = tuple(parameters) if (parameters is not None
+                                and not isinstance(parameters, dict)) else ()
+    named = parameters if isinstance(parameters, dict) else {}
+    args = mm.group(2) if mm.lastgroup == 2 else mm.group(0)
+    op = re.split(r",(?![^\[()]*[\]()])", args)[0].strip() \
+        if mm.lastgroup == 2 else "?"
+    try:
+        if op == "?":
+            return seq[_operand_bind_index(mm.string,
+                                           mm.start(2) if mm.lastgroup == 2
+                                           else mm.start(0))]
+        if op == "%s":
+            return seq[0] if len(seq) == 1 else None
+        if re.fullmatch(r"\?\d+", op):
+            return seq[int(op[1:])]
+        if re.fullmatch(r"%\(\w+\)s", op):
+            return named[re.fullmatch(r"%\((\w+)\)s", op).group(1)]
+        _t = op[1:-1] if op[:1] in ("'", '"') else op
+        if _t.lstrip().startswith("[") or re.match(r"^-?\d", _t):
+            return _t
+    except (IndexError, KeyError, TypeError, ValueError):
+        return None
+    return None
+
+
+def _vector_operand_from_binds(seq, conn):
+    """If a bind sequence carries a vector (list/JSON text), render it as
+    an fp32 pgvector literal; else None."""
+    for v in reversed(seq):
+        try:
+            if isinstance(v, (list, tuple)) and v and all(
+                    isinstance(x, (int, float)) for x in v):
+                return _fp32_vec_literal(v, conn)
+            if isinstance(v, (bytes, bytearray)):
+                v = v.decode()
+            if isinstance(v, str):
+                t = v.strip()
+                if t.startswith("[") and "," in t:
+                    return _fp32_vec_literal(t, conn)
+        except Exception:
+            continue
+    return None
+
+
+def _vec_quantize_value_sub(sql: str, parameters, conn):
+    """Resolve sqlite-vec quantizer calls in a KNN MATCH predicate.
+
+    pgvector's <=> operator needs an fp32 `vector` literal; sqlite-vec's
+    int8/bit quantizers are lossy and were dropped by design. So every
+    quantizer call inside a `col MATCH vec_quantize_*(...)` shape is
+    replaced IN PLACE by the exact fp32 vector literal rendered from the
+    operand's own value (bind slot or list literal). In-place means no
+    placeholder count changes for non-`?` operands; a `?` operand keeps
+    the call span so the generic bind-drop pass removes its slot.
+    Calls outside a KNN shape are left for the generic passes.
+    """
+    knn = _VEC_KNN_RE.search(sql)
+    if not knn:
+        return sql
+    seq = tuple(parameters) if (parameters is not None
+                                and not isinstance(parameters, dict)) else ()
+    named = parameters if isinstance(parameters, dict) else {}
+
+    def repl(mm):
+        if not (knn.start() <= mm.start() < knn.end()):
+            return mm.group(0)
+        # a residual quantizer whose first arg is already a casted SQL
+        # expression (left by an earlier rewrite pass): convert it to a
+        # pgvector operand the <=> predicate can type-resolve.
+        _args = mm.group(2) if (mm.group(2) or "").strip() else ""
+        if not _args:
+            _inner = re.match(
+                r"vec_quantize_\w+\s*\((.*)\)\s*$", mm.group(0),
+                re.I | re.S)
+            _args = _inner.group(1) if _inner else ""
+        first = re.split(r",(?![^\[()]*[\]()])", _args)[0].strip()
+        if first and first not in ("?", "%s", "%b") \
+                and not re.fullmatch(r"\?\d+|\(%\(\w+\)s\)", first) \
+                and "::" in first:
+            # the operand is an SQL EXPRESSION (an already-evaluated
+            # quantizer: ARRAY[..]::int8[], decode(..,'escape')::bit,
+            # or a quoted/casted list). Convert it to the canonical
+            # pgvector literal so the <=> predicate type-resolves.
+            _vo = _to_vec_operand(first)
+            _am = _VEC_OPERAND_ARG_RE.match(mm.group(0))
+            if _vo is not None and _am is not None:
+                return _am.group("head") + _vo + _am.group("rest")
+            if _vo is not None:
+                return _vo
+            # operand wrapped in parens or an inner call we cannot read:
+            # at least drop value-preserving casts.
+            return _strip_vector_casts(mm.group(0))
+        am = _VEC_OPERAND_ARG_RE.match(mm.group(0))
+        if not am:
+            return mm.group(0)
+        op = am.group("op").strip()
+        head, rest = am.group("head"), am.group("rest")
+        val = None
+        if op in ("?", "%s", "%b") or re.fullmatch(r"\?\d+", op) \
+                or re.fullmatch(r"%\(\w+\)s", op):
+            # SQLite's rule: a function operand is a VALUE. The KNN arm
+            # stores exact fp32 vectors (quantizers were dropped by
+            # design), so take the vector from the operand's bind slot
+            # when it is unambiguous — else scan the bind list for the
+            # one vector-shaped value the caller passed.
+            val = None
+            if op == "?":
+                idx = _operand_bind_index(mm.string,
+                                          mm.start(0) + am.start("op"))
+                if idx >= len(seq):
+                    raise _sqlite3.ProgrammingError(
+                        "vector quantizer operand placeholder has no "
+                        "parameter")
+                val = seq[idx]
+            elif op in ("%s", "%b"):
+                val = seq[0] if len(seq) == 1 else \
+                    _vector_operand_from_binds(seq, conn)
+            elif re.fullmatch(r"\?\d+", op):
+                try:
+                    val = seq[int(op[1:])]
+                except (IndexError, ValueError, TypeError):
+                    val = None
+            else:
+                val = named.get(re.fullmatch(r"%\(\w+\)s",
+                                             op).group(1))
+            if isinstance(val, (bytes, bytearray)):
+                val = val.decode()
+            if isinstance(val, str):
+                t = val.strip()
+                if not (t.startswith("[") or re.match(r"^-?\d", t)) \
+                        and "::" not in t:
+                    val = None
+                elif "::" in t and not t.startswith("[") and \
+                        not t.startswith("'"):
+                    _vo3 = _to_vec_operand(t)
+                    if _vo3 is not None:
+                        return head + _vo3 + rest
+            elif val is not None and not isinstance(val, (list, tuple)):
+                val = None
+            if val is not None and not isinstance(val, str):
+                return head + _fp32_vec_literal(val, conn) + rest
+            if val is not None:
+                t = val.strip()
+                if t.startswith("[") or re.match(r"^-?\d", t):
+                    return head + _fp32_vec_literal(val, conn) + rest
+                val = None
+        if val is None:
+            # literal operand (quoted or bare list, any trailing cast)
+            _vo = _to_vec_operand(op)
+            if _vo is not None:
+                return head + _vo + rest
+            txt = op[1:-1] if op[:1] in ("'", '"') else op
+            txt = txt.replace('""', "'").replace("''", "'")
+            if txt.lstrip().startswith("[") or re.match(r"^-?\d", txt):
+                val = txt if txt.lstrip().startswith("[") else "[" + txt + "]"
+            elif "::" in op:
+                # an expression we cannot fully read: drop value-
+                # preserving casts so <=> can type-resolve it.
+                return head + _strip_vector_casts(op) + rest
+        if val is None:
+            raise _sqlite3.OperationalError(
+                "cannot resolve vec_quantize operand for pgvector KNN: "
+                + op[:60])
+        return head + _fp32_vec_literal(val, conn) + rest
+    # NOTE: the placeholder forms ("?", "%s", "?N") are handled in the
+    # FIRST branch of repl below; the ordering there is authoritative.
+    try:
+        return _VEC_FN_CALL_RE.sub(repl, sql)
+    except (_sqlite3.Error, ValueError):
+        # cannot resolve the KNN operand here; leave the statement for
+        # the generic quantizer passes (they fail loudly if unusable)
+        return sql
+    return _VEC_FN_CALL_RE.sub(repl, sql)
 
 
 def _operand_bind_index(sql_text: str, arg_start: int) -> int:
@@ -618,11 +958,48 @@ def _quantize_placeholder_sub(mm, parameters, conn) -> str:
         value = _vec_quantize(mm.group(1), args_sql, parameters, conn)
     if value is None:                    # literal operand: inlined by caller
         return "''::text"
+    # _vec_quantize returns a computed SQL literal expression (int8[]
+    # array, decode(...) bits, or a text vector): SQLite's rule is that a
+    # function operand is a VALUE, not a statement bind, so inline it —
+    # the caller's placeholder bookkeeping stays untouched and the slot
+    # this call consumed is dropped from the bind list by the caller.
+    if isinstance(value, str) and (
+            _INLINEABLE_LITERAL_RE.match(value) or value[:1] == "'"):
+        # a computed quantizer literal (int8[] array, decode() bits, or
+        # quoted vector) is INLINED as SQL text — never queued: SQLite's
+        # rule is that a function operand is a VALUE, not a statement
+        # bind, and an inlined operand cannot desync the bind list.
+        # (A quoted vector string is safe here because render()'s named
+        # -placeholder scan runs over the ORIGINAL token positions... )
+        return _expr_to_operand(value)
     queue = getattr(conn, "_quant_binds", None)
     if queue is None:
         queue = conn._quant_binds = []
     queue.append(value)
     return "%s"
+
+
+# A quantizer operand written as a string literal ('[...]' or a doubled-
+# quote-escaped JSON blob) is inlined, never bound. A bare [...] blob or
+# numeric list is NOT a placeholder bind and must not enter the queue.
+# A quantizer VALUE already rendered as a SQL literal text (int8 list,
+# bit string, quoted vector string) may be inlined into statement text.
+_VALUE_LITERAL_OK_RE = re.compile(r"^\S")
+
+
+# A quantizer result safe to inline as statement text: int8 array casts
+# or bit decode() calls. Vector-STRING literals are NOT inlined — an
+# operator colon inside them ("[1,:0.5,...]") would be tokenized as a
+# named placeholder; they travel as binds instead (psycopg adapts them
+# to vector on the wire).
+_INLINEABLE_LITERAL_RE = re.compile(
+    r"^(?:ARRAY\[|decode\()"
+
+)
+
+
+_LITERAL_OPERAND_RE = re.compile(
+    r"^\s*(?:'(?:[^']|'')*'|\[|[-\d])")
 
 
 def _baked_count(sql: str, parameters) -> int:
@@ -700,7 +1077,7 @@ def _ensure_max_fn(raw, schema: str) -> None:
 
 def _companion_is_vector(table: str) -> bool:
     """True if `table`.embedding is a pgvector type in the active schema."""
-    key = (_CURRENT_SCHEMA[0], table)
+    key = (_CURRENT_SCHEMA[0] or _active_schema(), table)
     hit = _VEC_TYPE_CACHE.get(key)
     if hit is not None:
         return hit
@@ -709,14 +1086,15 @@ def _companion_is_vector(table: str) -> bool:
          " WHERE a.attrelid = cast(%s || '.' || %s as regclass)"
          " AND a.attname = 'embedding' AND a.attnum > 0")
     try:
+        schema = _CURRENT_SCHEMA[0] or _active_schema()
         conn = _ACTIVE_CONN[0]
-        if conn is not None:
-            row = conn.execute(q, (_CURRENT_SCHEMA[0], table)).fetchone()
+        if conn is not None and not conn._closed:
+            row = conn.execute(q, (schema, table)).fetchone()
         else:
             probe = psycopg.connect(_pg_dsn_for_probe(), autocommit=True,
                                     row_factory=psycopg.rows.dict_row)
             try:
-                row = probe.execute(q, (_CURRENT_SCHEMA[0], table)).fetchone()
+                row = probe.execute(q, (schema, table)).fetchone()
             finally:
                 probe.close()
         if row:
@@ -724,7 +1102,12 @@ def _companion_is_vector(table: str) -> bool:
             ok = str(vals[0] or "").lower().startswith("vector")
     except Exception:
         ok = False
-    _VEC_TYPE_CACHE[key] = ok
+    if ok or (_CURRENT_SCHEMA[0] and _ACTIVE_CONN[0] is not None):
+        _VEC_TYPE_CACHE[key] = ok
+    elif ok:
+        _VEC_TYPE_CACHE[key] = ok
+    # A False decided with no schema/connection context is NOT cached:
+    # it would disable KNN rewriting for the whole process.
     return ok
 
 
@@ -735,20 +1118,261 @@ def _companion_is_vector(table: str) -> bool:
 # dropped by design).
 _VEC_KNN_RE = re.compile(
     r"(?P<col>[\w.]+)\s+MATCH\s+"
-    r"(?:vec_quantize_\w+\s*\(\s*(?P<qargs>[^()]*?)\s*\)"
-    r"|(?P<op>\?|%(?:\([A-Za-z_]\w*\)|)s|\$\d+))"
+    r"(?:vec_quantize_\w+\s*\(\s*(?P<qargs>(?:[^()]|\([^()]*\))*?)"
+    r"\s*\)"
+    r"|(?P<op>\?|%(?:\([A-Za-z_]\w*\)|)s|\$\d+)"
+    r"|(?P<lit>'[^']*'|\[[^()]*\])(?:::\w+(?:\[\])?)?)"
     r"\s+AND\s+k\s*=\s*(?P<k>\d+)", re.I)
+
+
+_VEC_KNN_OP_RE = re.compile(
+    r"([\w.]+)\s+MATCH\s+vec_quantize_\w+\s*\(\s*([^()]*?)\s*\)"
+    r"\s+AND\s+k\s*=\s*(\d+)", re.I)
+
+
+def _re_qlq(qargs: str) -> bool:
+    """True if a KNN qargs group contains a bind placeholder."""
+    return bool(_PLACEHOLDER_RE.search(qargs)) if qargs else False
+
+
+_ARG_SPLIT_RE = re.compile(r",(?![^\[]*\])")  # comma outside [...] lists
+# literal-only form (no bind in the call): handled by the literal-inline
+# pass, so _rewrite_vec_knn leaves it untouched.
+_KNN_CALL_ONLY_RE = re.compile(
+    r"vec_quantize_\w+\s*\(\s*((?:[^()]|\([^()]*\))*)\)",
+    re.I | re.S)
+
+
+# standalone `AND k = N` clause (the sqlite-vec KNN cardinality arg)
+_VEC_KNN_AND_K_RE = re.compile(r"\s+AND\s+k\s*=\s*(\d+)", re.I)
+
+
+def _drop_companion_blob_projections(sql: str) -> str:
+    """Drop vec-companion blob projections from KNN SELECT lists.
+
+    sqlite-vec exposes the stored embedding as a readable column on the
+    virtual table (`SELECT rowid, distance, embedding FROM vec_*`), but
+    the PG companions hold `embedding vector(384)` as the indexed KNN
+    column that the rewrite references in the inner scan — projecting it
+    again in the outer list is an UndefinedColumn under the wrapper
+    form, and the core only uses the column for optional blob scoring
+    (which already abstains honestly on PG, query blob is None).  Only
+    touched by a sqlite-vec KNN predicate (caller checks MATCH first).
+    """
+    m0 = re.search(r"(?i)\bSELECT\s+(.*?)\s+FROM\s+vec_\w+", sql)
+    if not m0:
+        return sql
+    proj = ", ".join(
+        p.strip() for p in re.split(r",(?![^\[]*\])", m0.group(1))
+        if p.strip() and p.strip().lower()
+        not in ("embedding", "binary_vector"))
+    if not proj:
+        # every projection was a blob column: `SELECT  FROM` is a
+        # syntax error — a minimal projection keeps the statement
+        # well-formed. The KNN wrapper re-adds the blob columns from
+        # the companion (see _blob_cols below).
+        proj = "rowid"
+    _blob_cols = [c.strip() for c in re.split(r",(?![^\[]*\])", m0.group(1))
+                  if c.strip().lower() in ("embedding", "binary_vector")]
+    tail = sql[m0.end():]
+    if _blob_cols:
+        # sqlite-vec KNN: the blob columns live in the companion table
+        # the wrapper scans, so keep them in the projection (the
+        # wrapper's inner subquery re-supplies them).
+        return sql
+    return (sql[:m0.start()] + "SELECT " + proj + " FROM "
+            + m0.group(0).split("FROM", 1)[1].strip()
+            + (" " + tail if tail else ""))
 
 
 def _rewrite_vec_knn(sql: str):
     """Return rewritten SQL, or `sql` unchanged (identity) if not handled."""
+    return _rewrite_vec_knn_impl(sql)
+
+
+def _rewrite_vec_knn_impl(sql: str):
+    """Short-splice driver: rewrite on the k-truncated statement via
+    _rewrite_vec_knn_body (never recursing into this driver again),
+    then re-attach the caller tail to the produced body."""
+    m = _VEC_KNN_RE.search(sql)
+    if not m:
+        return sql
+    # the span must end at the `AND k = N` clause; anything else the
+    # tolerant operand alternation swallowed is not a KNN statement
+    _kws = _VEC_KNN_AND_K_RE.search(sql, m.start())
+    if _kws is None or _kws.end() != m.end():
+        return sql
+    fm = re.search(r"\bFROM\s+(?:\w+\s*\.\s*)?(\w+)", sql, re.I)
+    if not fm or not _companion_is_vector(fm.group(1)):
+        return sql
+    _kw = _kws
+    _cut = _kw.end() if _kw is not None else 0
+    _short = None
+    if _kw is not None and _kw.end() < len(sql) and "/*knn*/" not in sql:
+        # The in-place path assumes the MATCH..AND k span ends the
+        # statement.  When the caller appended a tail, rewrite on the
+        # truncated statement (cut at the k clause) and re-attach the
+        # caller tail.  If the produced body is the FROM-( )t wrapper,
+        # a bare ORDER BY / LIMIT tail is dropped (the inner scan is
+        # already ordered) and any other tail (extra predicates) goes
+        # through the wrapper's WHERE splice instead.
+        _short = sql[:_cut]
+    _out = None
+    if _short is not None:
+        # Call the BODY directly: the wrapper path below always returns
+        # from the `if _short is not None and _out is not _short:` arm,
+        # so the recursive call only exists to test splicability of the
+        # truncated statement. Going through _rewrite_vec_knn_impl
+        # recursively lets the DEEP call's short arm leak the k number
+        # (its `return _out + _tail` splices the literal k back in).
+        _out = _rewrite_vec_knn_body(_short)
+        if _out is _short:
+            # the truncated statement cannot rewrite (e.g. an outer
+            # projection referencing the virtual `distance` defeats
+            # the wrapper splice guard): fall back to the in-place
+            # path on the FULL statement below.
+            _short = None
+    if _short is not None and _out is not _short:
+            _tail = sql[_cut:]
+            if "FROM (" in _out:
+                if re.match(r"\s*(?:ORDER\s+BY\s+distance|LIMIT\s+\d+)\s*$",
+                            _tail, re.I):
+                    return _out
+                _tw = _tail.strip()
+                if _tw:
+                    # splice caller predicates into the wrapper WHERE
+                    _tw = re.sub(r"(?i)\bORDER\s+BY\s+\S+", "", _tw)
+                    _tw = re.sub(r"(?i)\bLIMIT\s+\d+", "", _tw).strip()
+                    if _tw:
+                        if re.search(r"(?i)\bWHERE\b", _out):
+                            _out = re.sub(r"(?i)\bWHERE\b",
+                                          "WHERE " + _tw + " AND", _out,
+                                          count=1)
+                        else:
+                            _out = (_out + " WHERE " + _tw
+                                    + (" ORDER BY t.distance"
+                                       if "ORDER BY" not in _out.upper()
+                                       else ""))
+                return _out
+            _mo = re.match(r"\s*ORDER\s+BY\s+distance\s*$", _tail, re.I)
+            if _mo and re.search(r"\bORDER\s+BY\b", _out, re.I):
+                return _out
+            return _out + _tail
+    return _rewrite_vec_knn_body(sql)
+
+
+def _rewrite_vec_knn_body(sql: str):
+    """In-place KNN rewrite on a statement whose MATCH..AND k span ends
+    the statement (no caller tail). Returns `sql` unchanged (identity)
+    if not a handled KNN form."""
     m = _VEC_KNN_RE.search(sql)
     if not m:
         return sql
     fm = re.search(r"\bFROM\s+(?:\w+\s*\.\s*)?(\w+)", sql, re.I)
     if not fm or not _companion_is_vector(fm.group(1)):
         return sql
-    operand = (m.group("qargs") or m.group("op") or "").split(",")[0].strip()
+    sql = _drop_companion_blob_projections(sql)
+    _vo_lit = None
+    if m.group("qargs") is None and m.group("op") is None:
+        # a bare literal operand (no quantizer call, no placeholder):
+        # resolve it to a pgvector literal so MATCH converts.
+        _lit_txt = m.group("lit") if "lit" in m.groupdict() else None
+        if _lit_txt is None:
+            seg = m.group(0)
+            mlit = re.search(
+                r"\s+MATCH\s+('[^()]*'|\[[^()]*\])\s+AND\s+k\s*=",
+                seg, re.I)
+            _lit_txt = mlit.group(1) if mlit else None
+        if _lit_txt is not None:
+            _vo_lit = _to_vec_operand(_lit_txt)
+            if _vo_lit is None:
+                return sql
+    if m.group("qargs") is not None and m.group("op") is None \
+            and not _PLACEHOLDER_RE.search(m.group("qargs")):
+        # operand is a pure literal quantizer call with no bind inside.
+        # If the literal resolves to a pgvector value we rewrite the KNN
+        # predicate ourselves (nothing else converts `MATCH` here); if it
+        # does not resolve, leave the statement untouched (fail loud).
+        _vo_lit = None
+        for _mcall in _KNN_CALL_ONLY_RE.finditer(m.group(0)):
+            _first = re.split(_ARG_SPLIT_RE, _mcall.group(1) or "")[0].strip()
+            _vo_lit = _to_vec_operand(_first)
+            if _vo_lit is None:
+                # the value pass may have inlined the operand as a
+                # single-quoted SQL string wrapping a list/array expr
+                # ("'[...]'" or "'ARRAY[..]::int8[]'"): unwrap and retry.
+                um = re.match(r"^'(.*)'(?:::\w+(?:\[\])?)?$", _first,
+                              re.S)
+                if um:
+                    _vo_lit = _to_vec_operand(um.group(1))
+            if _vo_lit is not None:
+                break
+        if _vo_lit is None:
+            return sql
+    if _vo_lit is not None:
+        operand = _vo_lit
+    else:
+        operand = (m.group("qargs") or m.group("op") or "").split(",")[0].strip()
+        if operand not in ("?",) and _PLACEHOLDER_RE.match(operand) \
+                and m.group("qargs") is None and m.group("op") is not None:
+            # a bare placeholder operand: the generic quantizer bind pass
+            # rewrites vec_quantize_?(...) spans to %s binds; keep as-is.
+            pass
+        elif operand and _vo_lit is None \
+                and operand.startswith("vec_quantize_"):
+            # residual quantizer call whose args were already value-
+            # resolved: convert its first arg to a pgvector operand.
+            em = re.match(
+                r"vec_quantize_\w+\s*\(\s*(.+?)(?:\s*,[^()]*?)?\s*\)$",
+                operand, re.I | re.S)
+            if em:
+                _vo = _to_vec_operand(em.group(1).strip())
+                if _vo is not None:
+                    operand = _vo
+                else:
+                    # inner arg may itself be a quantizer call chain or a
+                    # list literal: try the literal path.
+                    inner = em.group(1).strip()
+                    if inner.startswith("[") or (
+                            inner[:1] in ("'", '"') and "[" in inner):
+                        operand = _fp32_operand_from_list(inner)
+                        if operand is None:
+                            operand = inner
+    # The operand must end up as a single bind placeholder in the emitted
+    # SQL so the vec-quantizer substitution / bind pipeline can fill it.
+    # Literals or expressions that are not placeholders cannot be fed a
+    # vector bind — leave the statement untouched (fail loud downstream)
+    # unless it is a quantizer call whose inner operand IS a placeholder.
+    if operand and not _PLACEHOLDER_RE.match(operand) \
+            and not _LITERAL_VECTOR_RE.match(operand):
+        if _vo_lit is not None:
+            # already resolved to a pgvector literal above
+            pass
+        else:
+            inner = re.match(
+                r"vec_quantize_\w+\s*\(\s*([^,()]*?)(?:\s*,[^()]*?)?\s*\)$",
+                operand, re.I)
+            if inner and _PLACEHOLDER_RE.match(inner.group(1).strip()):
+                operand = inner.group(1).strip()
+            elif operand.startswith("(") and operand.endswith(")"):
+                # already-substituted wrapper (e.g. "(%s)") — keep it
+                if not _PLACEHOLDER_RE.search(operand):
+                    return sql
+            else:
+                return sql
+    if operand and not _PLACEHOLDER_RE.match(operand):
+        # operand already resolves to a pgvector-compatible value or
+        # expression: normalize it to the canonical ::vector literal so
+        # the <=> predicate type-resolves.
+        _vo = _to_vec_operand(operand)
+        if _vo is None:
+            em = re.match(
+                r"vec_quantize_\w+\s*\(\s*(.+?)(?:\s*,[^()]*?)?\s*\)$",
+                operand, re.I | re.S)
+            if em:
+                _vo = _to_vec_operand(em.group(1))
+        if _vo is not None:
+            operand = _vo
     head = sql[:m.start()].rstrip()
     tail = sql[m.end():].lstrip()
     if head.upper().endswith("WHERE"):
@@ -756,15 +1380,176 @@ def _rewrite_vec_knn(sql: str):
     if tail[:5].upper() == "WHERE":
         tail = "AND " + tail[5:].lstrip()
     parts = [t.strip() for t in (head, tail) if t.strip()]
-    pred = "embedding <=> " + operand + " AS distance"
-    if parts:
+    # SQLite sqlite-vec exposes `distance` as a virtual column; PG has no
+    # such column, so the emitted SQL must never reference a bare
+    # `distance` name: every SELECT-list / ORDER-BY / WHERE mention of it
+    # becomes the cosine expression. The predicate itself stays a bare
+    # expression (`AS alias` is illegal inside WHERE).
+    # A WHERE predicate must be boolean; `a <=> b` is a double-precision
+    # distance, never a boolean. The KNN predicate therefore becomes a
+    # TRUE-valued gate (COALESCE(dist,0) >= -1: always true for finite
+    # distances, NULL-safe) and the ORDER BY carries the real cosine.
+    # distance ordering + LIMIT k is the KNN semantics sqlite-vec gives.
+    _gate = "COALESCE(embedding <=> " + operand + ", 0) >= -1"
+    if head and _PLACEHOLDER_RE.match(operand):
+        # placeholder operand appearing in several emitted slots (gate,
+        # distance projection, ORDER BY): the bind slot exists once in
+        # the caller's parameter list, so the emitted SQL must reference
+        # the placeholder exactly once. Wrap the table scan in a
+        # sub-select: distance is computed once (placeholder lives
+        # there), and the outer query filters/orders on the column.
+        _fm = re.search(r"(?i)\bFROM\s+([\w.]+)", sql)
+        _where_extra = sql[m.end():]
+        _op_inner_i = operand
+        _qc_i = re.match(
+            r"vec_quantize_\w+\s*\(\s*(.+?)(?:\s*,[^()]*?)?\s*\)$",
+            operand, re.I | re.S)
+        if _qc_i:
+            _voq_i = _to_vec_operand(_qc_i.group(1).strip())
+            if _voq_i is not None:
+                _op_inner_i = _voq_i
+        _inner = "SELECT rowid, (embedding <=> " + _op_inner_i + \
+                 ") AS distance FROM " + (_fm.group(1) if _fm else "") + \
+                 " ORDER BY distance LIMIT " + m.group("k")
+        # caller projected blob columns (e.g. `SELECT rowid, distance,
+        # embedding FROM vec_*`): the companion table HAS them, so the
+        # inner scan carries them and the outer projection resolves.
+        _extra_cols = re.findall(
+            r"(?i)\b(embedding|binary_vector)\b",
+            sql[:m.start()])
+        if _extra_cols:
+            _inner = ("SELECT rowid, (embedding <=> " + _op_inner_i +
+                      ") AS distance, " +
+                      ", ".join(dict.fromkeys(c.lower() for c in _extra_cols)) +
+                      " FROM " + (_fm.group(1) if _fm else "") +
+                      " ORDER BY distance LIMIT " + m.group("k"))
+        head2 = sql[:m.start()].rstrip()
+        while head2.upper().endswith("WHERE"):
+            head2 = head2[:-5].rstrip()
+        tail2 = sql[m.end():].lstrip()
+        if tail2[:5].upper() == "WHERE":
+            tail2 = "AND " + tail2[5:].lstrip()
+        # A literal quantizer operand (post value-pass) must not be
+        # re-quantized: use the RESOLVED operand expression in the inner
+        # scan, not the raw quantizer call.
+        _op_inner = operand
+        _qc = re.match(
+            r"vec_quantize_\w+\s*\(\s*(.+?)(?:\s*,[^()]*?)?\s*\)$",
+            operand, re.I | re.S)
+        if _qc:
+            _voq = _to_vec_operand(_qc.group(1).strip())
+            if _voq is not None:
+                _op_inner = _voq
+        # rewrite bare `distance` refs in the caller's own text to the
+        # inner column (already named `distance`).
+        def _dref(mm):
+            pre = mm.string[:mm.start()]
+            if re.search(r"[\w.]\s*$|\bAS\s*$", pre, re.I):
+                return mm.group(0)
+            return "t.distance"
+        head2 = re.sub(r"(?i)\s+FROM\s+[\w.]+(\s+[AS]\s+\w+)?\s*$",
+                       "", head2)
+        # Peel a trailing `WHERE <col> [WHERE <col>]...` stub chain
+        # (_drop_companion_blob_projections / short-splice recursion can
+        # stack them, even glued to the projection without a space):
+        # the wrapper supplies the real WHERE-free form.
+        while True:
+            _hp = head2
+            head2 = re.sub(r"(?i)\s*(?:\bWHERE\s+[\w.]+\s*)+$", "",
+                           head2).rstrip()
+            head2 = re.sub(r"(?i)\s+FROM\s+[\w.]+(\s+[AS]\s+\w+)?\s*$",
+                           "", head2).rstrip()
+            if head2 == _hp:
+                break
+        outer_sel = re.sub(r"\bdistance\b", _dref, head2)
+        outer_tail = re.sub(r"\bdistance\b", _dref, tail2)
+        # The caller's k clause itself must never survive into the tail
+        # (recursion cut at `k`, `_kw.end()` may sit before the number):
+        # a tail that is nothing but the k NUMBER / `AND k = N` / the
+        # neutralised ORDER BY / LIMIT tail is KNN bookkeeping, not
+        # caller text.  (A bare number is the k operand left by the
+        # short-splice cut; the generic epilogue's LIMIT check then
+        # never sees a k slot to re-bake.)
+        outer_tail = re.sub(r"(?i)^(?:\s*\d+|\s*(?:AND\s+)?k\s*=\s*\d+|"
+                           r"ORDER\s+BY\s+distance|LIMIT\s+\d+)\s*$",
+                           "", outer_tail).strip()
+        # strip ORDER BY distance from the tail (inner already ordered)
+        outer_tail = re.sub(r"(?i)\bORDER\s+BY\s+t?\.?distance\b", "",
+                            outer_tail).strip()
+        outer_tail = re.sub(r"(?i)^AND\b", "WHERE", outer_tail).strip()
+        if outer_tail.upper().startswith("WHERE"):
+            body = (outer_sel + " FROM (" + _inner + ") t " + outer_tail)
+        else:
+            body = (outer_sel + " FROM (" + _inner + ") t" +
+                    ((" " + outer_tail) if outer_tail else ""))
+        # head had no projection? fall back to generic path
+        if not outer_sel.strip():
+            body = "SELECT * FROM (" + _inner + ") t"
+        # The wrapper body is final here: the generic epilogue below
+        # (ORDER BY / LIMIT k appended to `body`) must never run over
+        # the wrapper form — when the caller had a tail, the in-place
+        # generic path is not reached at all for the wrapper shape.
+        if re.search(r"\bFROM\s*\(", body):
+            return body
+    if head:
+        pred = _gate
+    else:
+        pred = _gate + " AS distance"
+    cos = "embedding <=> " + operand
+    # A statement may reference the KNN operand several times (SELECT-
+    # list `distance`, WHERE predicate, ORDER BY). If the operand is a
+    # placeholder, every extra reference (beyond the WHERE predicate's)
+    # would consume an extra bind slot the caller never passed. Make the
+    # extras refer to the same slot via a repeated placeholder marker:
+    # SQLite `?N`-style repeats are handled by params.render baking one
+    # literal value, so emit the FIRST occurrence as the placeholder and
+    # subsequent ones as `?`-repeats keyed to that slot.
+    if head and _PLACEHOLDER_RE.match(operand) \
+            and "distance" not in (head or ""):
+        pass
+
+    def _dist_ref(mm):
+        pre = mm.string[:mm.start()]
+        # a qualified ref (`x.distance`) or an alias definition
+        # ("... AS distance") is not the virtual-column reference
+        if re.search(r"[\w.]\s*$|\bAS\s*$", pre, re.I):
+            return mm.group(0)
+        return cos
+    if head:
+        # virtual-column substitution applies to the caller's own text
+        # (head + tail), never to the predicate we generate. Substituting
+        # on the ORIGINAL statement text guarantees each `distance` ref is
+        # replaced exactly once regardless of surrounding edits.
+        joined = re.sub(r"\bdistance\b", _dist_ref, sql)
+        # re-split around the original MATCH span within substituted text
+        m2 = _VEC_KNN_RE.search(joined)
+        if m2:
+            head2 = joined[:m2.start()].rstrip()
+            if head2.upper().endswith("WHERE"):
+                head2 = head2[:-5].rstrip()
+            tail2 = joined[m2.end():].lstrip()
+            if tail2[:5].upper() == "WHERE":
+                tail2 = "AND " + tail2[5:].lstrip()
+        else:
+            head2, tail2 = head, tail
+        tparts = [t for t in (head2, tail2) if t.strip()]
+        if tparts:
+            body = tparts[0] + " WHERE " + pred
+            if len(tparts) > 1:
+                body += " " + " ".join(tparts[1:])
+        else:
+            body = "WHERE " + pred
+    elif parts:
         body = parts[0] + " WHERE " + pred
         if len(parts) > 1:
             body += " " + " ".join(parts[1:])
     else:
         body = "WHERE " + pred
     if not re.search(r"\bORDER\s+BY\b", body, re.I):
-        body += " ORDER BY distance"
+        body += " ORDER BY " + cos
+    elif head and re.search(r"\bORDER\s+BY\s+distance\b", body, re.I):
+        body = re.sub(r"\bORDER\s+BY\s+distance\b", "ORDER BY " + cos,
+                      body, count=1, flags=re.I)
     # only add the KNN k when the statement has NO LIMIT at all — a
     # placeholder LIMIT belongs to the caller's bind list (e.g.
     # "... WHERE <eligibility> LIMIT ?" with the k passed as a param),
@@ -773,6 +1558,12 @@ def _rewrite_vec_knn(sql: str):
         body += " LIMIT " + m.group("k")
     return body
 
+
+# --- SQLite upsert -> PG ON CONFLICT ----------------------------------------
+# The vendored core writes SQLite `INSERT OR REPLACE/IGNORE INTO ...` at 36+
+# sites. PG equivalent: INSERT ... ON CONFLICT <clause>. Requires knowing
+# the conflict target (a unique key), which is resolved from the catalog at
+# runtime (first unique index/PK over non-excluded columns).
 
 # --- SQLite upsert -> PG ON CONFLICT ----------------------------------------
 # The vendored core writes SQLite `INSERT OR REPLACE/IGNORE INTO ...` at 36+
@@ -1024,6 +1815,42 @@ class Cursor:
             self._conn._begin_if_idle()
         if re.match(r"^\s*(ROLLBACK\s+TO\b|RELEASE\b)", sql_s, re.I):
             self._conn._begin_if_idle()
+        # vec0 sqlite_master probe with a BOUND table name: the inline
+        # rewrite in _normalize_ddl only sees literal names, so bind-form
+        # probes (name=?) must be recognized here.
+        if _SQLITE_MASTER_VEC_RE.search(sql_s) and (
+                parameters and not isinstance(parameters, dict)):
+            _two_col = bool(re.search(r"SELECT\s+name\s*,\s*sql",
+                                      sql_s, re.I))
+            _p0 = list(parameters)[0] if parameters else None
+            if isinstance(_p0, str) and _p0.startswith("vec_") and \
+                    re.fullmatch(r"\w+", _p0):
+                _ddl_q = _SQLITE_MASTER_VEC_SQL.replace("@TABLE@", _p0)
+                if _companion_is_vector(_p0):
+                    _ddl_q = _ddl_q.replace(" '])'", " ']) /*float32*/'")
+                _pc = self._pg.cursor()
+                _pc.execute(_ddl_q)
+                _r = _pc.fetchone()
+                _pc.close()
+                # core reads row[0] as the DDL text (single-column
+                # SELECT shape of `SELECT sql FROM sqlite_master`).
+                _sql_txt = None
+                if _r is not None:
+                    _v = (_r["sql"] if "sql" in _r else
+                          (list(_r.values())[-1] if hasattr(_r, "values")
+                           else _r[-1]))
+                    _sql_txt = _v
+                if _two_col:
+                    self._delegate = _RowCursor(
+                        ("name", "sql"),
+                        [(_p0, _sql_txt)] if _r else [])
+                    self.description = (("name",), ("sql",))
+                else:
+                    self._delegate = _RowCursor(("sql",),
+                                                [(_sql_txt,)] if _r else [])
+                    self.description = (("sql",),)
+                self.rowcount = 1 if _r is not None else -1
+                return self
         if sql_s.upper().startswith("PRAGMA"):
             c = _pragma(self._conn, sql_s)
             if c is None:                       # honest no-op set
@@ -1042,14 +1869,31 @@ class Cursor:
             self.rowcount = -1
             return self
         sql_s = _rewrite_upsert(sql_s, self._conn)
+        _had_bare_rowid = bool(re.search(r"(?<![\w.\"])rowid\b", sql_s))
         sql_s = _rowid_rewrite.rewrite_rowids(
             sql_s, _CURRENT_SCHEMA[0] or "", self._conn)
         sql_s, _fts_changed = _fts_rewrite.rewrite_fts_sql(sql_s)
+        # sqlite-vec quantizers are VALUES (sqlite's rule: a function
+        # operand is not a statement bind), so first try resolving each
+        # call IN PLACE against its operand's own bind — this preserves
+        # the caller's placeholder bookkeeping exactly. Only if a call
+        # survives (operand shape we cannot resolve in place) fall back
+        # to the bind-queue substitution below.
+        if _VEC_FN_CALL_RE.search(sql_s):
+            sql_s = _vec_quantize_value_sub(sql_s, parameters, self._conn)
+        _has_quant = bool(_VEC_FN_CALL_RE.search(sql_s))
+        if _has_quant:
+            _orig_sql_for_drop = sql_s
+            _orig_params = parameters
+            sql_s = _VEC_FN_CALL_RE.sub(
+                lambda mm: _quantize_placeholder_sub(
+                    mm, _orig_params, self._conn), sql_s)
+            parameters = _quant_params_drop(_orig_sql_for_drop, parameters)
         knn = _rewrite_vec_knn(sql_s)
         if knn is not sql_s:
-            # whole sqlite-vec KNN predicate translated to cosine KNN; the
-            # quantizer operand stays a normal bind (pgvector takes the
-            # fp32 vector directly — no quantization at all).
+            # whole sqlite-vec KNN predicate translated to cosine KNN
+            # (quantizer operand is a %s bind from the pass above, or a
+            # literal inlined by the generic path below).
             sql_s = knn
         if _VEC_FN_CALL_RE.search(sql_s):
             # sqlite-vec quantizers are evaluated in Python (see
@@ -1058,21 +1902,50 @@ class Cursor:
             # list keeps its exact placeholder bookkeeping (sqlite's own
             # rule: a function operand is a value, not a statement bind).
             _lit_only = [m for m in _VEC_FN_CALL_RE.finditer(sql_s)
-                         if re.match(r"^\s*'[^']*'", m.group(2))]
+                         if re.match(r"""^\s*(?:'[^']*'|"[^"]*")""",
+                                      m.group(2))]
             if len(_lit_only) == sum(
                     1 for _ in _VEC_FN_CALL_RE.finditer(sql_s)):
-                # every call has a literal operand: inline directly
-                sql_s = _VEC_FN_CALL_RE.sub(
-                    lambda mm: _vec_quantize(
-                        mm.group(1), mm.group(2), (), self._conn), sql_s)
+                # every call has a literal operand: the KNN arm (exact
+                # fp32) uses the operand's vector literal form directly;
+                # otherwise evaluate the quantizer as a SQL expression.
+                def _lit_sub(mm):
+                    _f0 = re.split(r",(?![^\[()]*[\]()])",
+                                   mm.group(2))[0].strip()
+                    _vo = _to_vec_operand(_f0)
+                    if _vo is not None:
+                        return _vo
+                    return _vec_quantize(mm.group(1), mm.group(2), (),
+                                         self._conn)
+                sql_s = _VEC_FN_CALL_RE.sub(_lit_sub, sql_s)
             else:
                 _orig_params = parameters
                 _orig_sql_for_drop = sql_s   # placeholders before sub
                 sql_s = _VEC_FN_CALL_RE.sub(
                     lambda mm: _quantize_placeholder_sub(
                         mm, _orig_params, self._conn), sql_s)
-                parameters = _quant_params_drop(_orig_sql_for_drop, parameters)
+                parameters = _quant_params_drop(_orig_sql_for_drop,
+                                                parameters)
         native, bound = _params.render(sql_s, parameters, conn=self._conn)
+        # SQLite row-name parity: core code does `row["rowid"]` on rows
+        # read from shim tables (SQLite's implicit rowid).  The shim
+        # rewrite above retargets the column to `<table>__rowid`; alias it
+        # back so the result column is named `rowid` like SQLite's.
+        _rid_alias = re.search(r"\bFROM\s+(?:\w+\s*\.\s*)?(\w+)", native, re.I)
+        # The rowid shim already renamed `rowid` -> `<table>__rowid` in
+        # `native`, so test the PRE-render SQL for the bare-rowid reference.
+        # Skip if the SELECT list already carries an explicit rowid alias
+        # (callers like `SELECT working_memory__rowid AS rowid ...` would
+        # otherwise get a double alias: `x AS "rowid" AS working_memory__rowid`).
+        if (_rid_alias
+                and _had_bare_rowid
+                and not _rid_alias.group(1).lower().startswith("vec_")
+                and not re.search(
+                    r"(?i)\bas\s+\"?rowid\"?\b",
+                    native[:_rid_alias.start()])):
+            native = re.sub(
+                rf"(?<![\w.\\])({_rid_alias.group(1)}__rowid)\b",
+                r'\1 AS "rowid"', native, count=1)
         if self._conn._quant_binds:
             binds = self._conn._quant_binds
             self._conn._quant_binds = None
@@ -1371,6 +2244,13 @@ class NativeConn:
     def _stat_delta(self, before):
         if before is None:
             return None
+        # stats collector/collector-view lags behind commits; force the
+        # pending stats into the view first or a same-connection write
+        # measures a delta of 0 (SQLite would report the true count).
+        try:
+            self._raw.execute("SELECT pg_stat_force_next_flush()")
+        except Exception:
+            pass
         after = self._stat_counts()
         return None if after is None else after - before
 

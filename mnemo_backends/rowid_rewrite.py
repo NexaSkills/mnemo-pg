@@ -93,4 +93,31 @@ def rewrite_rowids(sql: str, schema: str, conn) -> str:
             return m.group(0)
         return f"{a}.{t}__rowid"
 
-    return _QUAL_ROWID_RE.sub(qual, sql)
+    sql = _QUAL_ROWID_RE.sub(qual, sql)
+
+    # Bare `rowid` (no qualifier): SQLite gives every table an implicit
+    # rowid; core SQL like `SELECT rowid FROM working_memory WHERE ...`
+    # relies on it.  Retarget ONLY statements whose FROM/UPDATE target is
+    # a single shim-only table (no real rowid column).  Joins, subqueries,
+    # INSERTs and mixed real/shim shapes are left untouched and fail
+    # loudly as before.
+    if _BARE_ROWID_RE.search(sql):
+        m = re.match(
+            r"\s*(?:SELECT\b.*?\bFROM|UPDATE)\s+(?:(\w+)\s*\.\s*)?(\w+)"
+            r"(?:\s+(?:AS\s+)?(?!WHERE\b|SET\b|VALUES\b|USING\b|JOIN\b"
+            r"|GROUP\b|ORDER\b|LIMIT\b|WHERE\b|RETURNING\b|CONFLICT\b"
+            r"|DO\b|BEGIN\b|FOR\b|,|\()\s*(\w+))?",
+            sql, re.I | re.S)
+        if m and not re.search(r"\b(?:JOIN|UNION|INTERSECT|EXCEPT)\b"
+                               r"|\bFROM\s*\(", sql, re.I):
+            base = m.group(2).lower()
+            if not base.startswith("vec_"):
+                try:
+                    known = base in {t for (_s, t) in _REAL_ROWID}
+                except Exception:
+                    known = False
+                if known or _table_exists(schema, base, conn):
+                    if not _table_has_real_rowid(schema, base, conn):
+                        sql = _BARE_ROWID_RE.sub(f"{base}__rowid", sql)
+
+    return sql
