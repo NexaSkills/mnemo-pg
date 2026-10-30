@@ -30,7 +30,8 @@ def scan(hermes: Path = HERMES):
         s = str(p)
         if "mnemosyne" not in p.name.lower():
             continue
-        if "/backups/" in s or "/mnemo-pg/" in s or "/cache/" in s:
+        if "/backups/" in s or "/mnemo-pg/" in s or "/cache/" in s \
+                or "/hermes-migration-" in s or ".retired-" in s:
             continue
         try:
             st = p.stat()

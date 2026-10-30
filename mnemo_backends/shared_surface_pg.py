@@ -75,7 +75,8 @@ def _sweep_residue() -> None:
     moved = 0
     for f in out:
         if "/backups/" in f or "/staging/" in f or "/state-snapshots/" in f \
-                or "/cache/scratch/" in f or "/workspace/" in f:
+                or "/cache/scratch/" in f or "/workspace/" in f \
+                or "/hermes-migration-" in f or ".retired-" in f:
             continue
         try:
             sz = os.path.getsize(f)
