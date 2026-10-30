@@ -128,6 +128,13 @@ try:
     binding.bind()  # sweep anything importable outside the hook's scope
 
     _boot = _upstream
+    # PG datetimes must not break tool-reply serialization (adapter layer).
+    try:
+        from mnemo_backends import json_safe as _js
+        _js.install(getattr(_upstream, "MnemosyneMemoryProvider", None))
+    except BaseException as exc:
+        print(f"[mnemosyne] json-safe reply wrapper skipped: {exc}",
+              file=sys.stderr)
 except Exception as exc:  # pragma: no cover
     _BOOT_ERROR = f"{type(exc).__name__}: {exc}"
 
