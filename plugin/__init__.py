@@ -145,6 +145,14 @@ try:
     except BaseException as exc:
         print(f"[mnemosyne] sqlite->pg backstop skipped: {exc}",
               file=sys.stderr)
+    # LCM store names (lcm.db / lcm_*.db) convert to PG in the same process
+    # (lcm-pg's own per-module swap is primary; this is the backstop).
+    try:
+        from mnemo_backends import lcm_store_to_pg as _l2p
+        _l2p.install()
+    except BaseException as exc:
+        print(f"[mnemosyne] lcm-store->pg backstop skipped: {exc}",
+              file=sys.stderr)
     try:
         from mnemo_backends import shared_surface_pg as _sp
         _sp.install(getattr(_upstream, "MnemosyneMemoryProvider", None))
