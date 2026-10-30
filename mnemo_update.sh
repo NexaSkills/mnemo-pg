@@ -169,6 +169,10 @@ if [[ $NORESTART -eq 0 && $DRY -eq 0 ]]; then
 fi
 
 # ----------------------------------------------------------- 5. CHECK_ALL
+# deps hook first: hosts without system pip need psycopg located/installed
+# before check_all runs (writes MNEMO_PSYCOPG_SITE into root .env once).
+[[ "$DRY" == "1" ]] || python3 "$PLUGIN_DIR/scripts/ensure_deps.py" \
+  || log "WARN: ensure_deps failed — check_all may fail on psycopg import"
 CHECKRC=0
 python3 "$PLUGIN_DIR/scripts/check_all.py" || CHECKRC=$?
 echo
