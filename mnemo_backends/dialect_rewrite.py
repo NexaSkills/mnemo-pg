@@ -95,7 +95,27 @@ _IS_NOT_LITERAL_RE = re.compile(
 )
 
 
+_MINMAX2 = re.compile(
+    # SQLite scalar min(a,b)/max(a,b) with exactly two args (no nested
+    # parens inside: the core's uses are column pairs like
+    # min(fact_a_id, fact_b_id) in the E8 conflicts pair index).
+    r"\b(min|max)\s*\(\s*([A-Za-z_][\w$]*(?:\.[A-Za-z_][\w$]*)?)\s*,\s*"
+    r"([A-Za-z_][\w$]*(?:\.[A-Za-z_][\w$]*)?)\s*\)",
+    re.IGNORECASE)
+
+
+def _minmax2(m: re.Match) -> str:
+    return ("least(" if m.group(1).lower() == "min" else "greatest(") + \
+           f"{m.group(2)}, {m.group(3)})"
+
+
 def rewrite_dialect(sql: str) -> str:
+    # SQLite 2-arg scalar min()/max() has no PG twin (PG min/max are
+    # aggregates only): rewrite to least()/greatest(). Without this the
+    # vendored E8 migration (idx_conflicts_pair_norm on
+    # min(fact_a_id, fact_b_id)) dies with 'No function matches the given
+    # name and argument types' on first init of a fresh PG schema.
+    sql = _MINMAX2.sub(_minmax2, sql)
     if "COLLATE" not in sql.upper() and "IS NOT" not in sql.upper():
         return sql
     out = sql

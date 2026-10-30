@@ -78,7 +78,7 @@ TABLES: list[tuple[str, list[str], list[str]]] = [
         "event_date date",
         "event_date_precision text",
         "temporal_tags jsonb",
-        "corrected_by text",
+        "corrected_by bigint",  # INTEGER in core guards (beam.py 2033/2037)
     ], []),                                          # PK declared inline (id)
 
     ("episodic_memory", [

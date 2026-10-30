@@ -1053,6 +1053,82 @@ _ACTIVE_CONN: list = [None]
 
 
 _HEALED_SCHEMAS: set = set()
+_HEALED_CONTRACT_SCHEMAS: set = set()
+
+
+def _ensure_contract_columns(raw, schema: str) -> None:
+    """Self-heal missing contract columns on legacy-lineage schemas.
+
+    A schema can predate the vendored core's table lineage (older
+    mnemosyne generation created episodic_memory with a different shape:
+    summary/source_type/entities instead of source/summary_of/veracity...).
+    The core's lazy `CREATE TABLE IF NOT EXISTS` +
+    `_add_column_if_missing` migrations assume the CREATE-era columns
+    exist, so on a foreign-lineage schema init crashes with
+    UndefinedColumn before ever reaching the lazy adds. We add exactly
+    the vendored CREATE contract columns (IF NOT EXISTS: no-ops on a
+    correct schema, and the core's own migrations remain authoritative
+    for every later column). Once per schema per process, like
+    _ensure_max_fn; failures are silent — the core's error path stays
+    honest if a heal genuinely cannot apply.
+    """
+    if schema in _HEALED_CONTRACT_SCHEMAS:
+        return
+    _HEALED_CONTRACT_SCHEMAS.add(schema)
+    # Vendored core CREATE contracts (beam.py init_db; column types from
+    # the same declarations). Names only — types all TEXT except the
+    # obvious numerics; a wrong type only matters if the core verifies.
+    for table, cols in _CONTRACT_COLUMNS:
+        for col in cols:
+            try:
+                raw.execute(
+                    "ALTER TABLE " + _q(schema) + "." + _q(table) +
+                    " ADD COLUMN IF NOT EXISTS " + _q(col) + " " +
+                    _contract_type(col))
+            except Exception:
+                break  # table absent or locked: this table is not ours
+
+
+_CONTRACT_COLUMNS: tuple = ()
+
+
+def _contract_type(col: str) -> str:
+    # corrected_by/validated_at are INTEGER in the vendored core's own
+    # _add_column_if_missing guards (beam.py 2033/2037): a text twin makes
+    # the guard's PRAGMA type compare fail with 'schema mismatch ...
+    # expected INTEGER, got TEXT' on every fresh (native-DDL) schema.
+    return {"importance": "double precision", "recall_count": "bigint",
+            "tier": "bigint", "binary_vector": "bytea",
+            "validation_count": "bigint",
+            "corrected_by": "bigint",
+            "confidence": "double precision",
+            "reinforcement_count": "bigint",
+            "mention_count": "bigint"}.get(col, "text")
+
+
+def _load_contract_columns() -> None:
+    """Built-in minimal contract (tables the recall/init path touches).
+    The core's own lazy migrations stay authoritative for everything
+    beyond the CREATE-era columns."""
+    global _CONTRACT_COLUMNS
+    if _CONTRACT_COLUMNS:
+        return
+    _CONTRACT_COLUMNS = (
+        ("working_memory", (
+            "id", "content", "timestamp", "session_id", "importance",
+            "metadata_json", "source", "veracity", "memory_type",
+            "consolidated_at", "consolidation_claimed_at", "scope",
+            "author_id", "author_type", "channel_id")),
+        ("episodic_memory", (
+            "id", "content", "source", "timestamp", "session_id",
+            "importance", "metadata_json", "summary_of", "veracity",
+            "created_at", "tier", "degraded_at", "memory_type",
+            "binary_vector", "recall_count", "last_recalled",
+            "valid_until", "superseded_by", "scope", "author_id",
+            "author_type", "channel_id", "trust_tier", "validator",
+            "validated_at", "validation_count", "event_date",
+            "event_date_precision", "temporal_tags", "corrected_by")),
+    )
 
 
 def _ensure_max_fn(raw, schema: str) -> None:
@@ -2148,6 +2224,8 @@ class NativeConn:
         _CURRENT_SCHEMA[0] = schema
         _ACTIVE_CONN[0] = self
         _ensure_max_fn(self._raw, schema)
+        _load_contract_columns()
+        _ensure_contract_columns(self._raw, schema)
         if query_only:
             self._raw.execute("SET transaction_read_only = on")
         # durability parity with SQLite WAL + synchronous=FULL
@@ -2295,10 +2373,35 @@ class NativeConn:
                 "JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace "
                 "WHERE n.nspname = current_schema() AND c.relname = %s "
                 "AND a.attidentity IN ('a','b') AND a.attnum > 0 "
-                "ORDER BY a.attnum LIMIT 1", (table,)).fetchone()
+                # Prefer the PRIMARY KEY column as the lastrowid source.
+                # attnum order is physical, not logical: a legacy table
+                # converged by ADD COLUMN can have the rowid twin at a
+                # LOWER attnum than the core's own `id` column (manny/
+                # tessa canonical_facts 2026-10-30), and RETURNING the
+                # twin returns a sequence value that matches no `id`.
+                "ORDER BY (EXISTS (SELECT 1 FROM pg_index i "
+                "            WHERE i.indrelid = a.attrelid "
+                "              AND i.indisprimary "
+                "              AND i.indkey::int[] @> "
+                "ARRAY[a.attnum]::int[])) DESC, "
+                "       a.attnum LIMIT 1", (table,)).fetchone()
             col = r["attname"] if r else None
         except Exception:
             col = None
+        # An aborted transaction (the core's savepoint-rollback paths leave
+        # these) would poison EVERY later INSERT: psycopg rejects all
+        # commands until the block ends, turning one caught-and-swallowed
+        # error into an InFailedSqlTransaction cascade. SQLite's error
+        # recovery is per-statement, so restore that boundary here: if the
+        # introspection above aborted the block, end it the way SQLite
+        # already has (the core's except-path rollback/commit becomes an
+        # idempotent no-op afterwards).
+        try:
+            if (self._raw.info.transaction_status
+                    == psycopg.pq.TransactionStatus.INERROR):
+                self.rollback()
+        except Exception:
+            pass
         self._identity_cache[table] = col
         return col
 
