@@ -7,4 +7,4 @@ Type=oneshot
 # MNEMO_TRIPWIRE_LOOKBACK comes from root .env if present — default 6h in-script.
 Environment=REPO=%h/.hermes/plugins/mnemo-pg
 EnvironmentFile=-%h/.hermes/.env
-ExecStart=/bin/sh -c 'for d in "${REPO}" ${HOME}/.hermes/plugins/mnemo-pg ${HOME}/.hermes/plugins/mnemosyne ${HOME}/workspace/mnemo-pg/repo; do if [ -f "${d}/scripts/retire_check.py" ]; then exec python3 "${d}/scripts/retire_check.py"; fi; done; echo "retire_check.py not found in any candidate REPO dir"; exit 1'
+ExecStart=/bin/sh -c 'P=scripts/retire_check.py; for d in "${REPO}" "$HOME"/workspace/mnemo-pg/repo "$HOME"/.hermes/plugins/mnemo-pg "$HOME"/.hermes/plugins/mnemosyne "$HOME"/.hermes/mnemo-pg/repo; do [ -f "$d/$P" ] && exec python3 "$d/$P"; done; echo "retire_check.py not found" >&2; exit 1'
