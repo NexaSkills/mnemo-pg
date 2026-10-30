@@ -57,6 +57,18 @@ def main() -> int:
         print(f"WARN: {len(leftover)} unarchived mnemosyne sqlite file(s) (old mtime, not live):")
         for p, st in leftover:
             print(f"   {p}  size={st.st_size}  mtime={time.strftime('%F %T', time.localtime(st.st_mtime))}")
+    # env-side tripwire (2026-10-30): the legacy sqlite-era pip packages must
+    # stay out of every Hermes install env -- their entry points let Hermes
+    # discovery serve the pre-PG provider before any plugin can intervene.
+    wipe = HERMES.parent / "workspace/mnemo-pg/repo/scripts/wipe_legacy_site_packages.py"
+    if wipe.exists():
+        import subprocess
+        r = subprocess.run([sys.executable, "-I", str(wipe)],
+                           capture_output=True, text=True)
+        if r.returncode != 0:
+            print("TRIPWIRE: legacy mnemosyne packages RESURRECTED in env(s):")
+            print((r.stdout or "").strip())
+            rc = 1
     if not fresh and not leftover:
         print("tripwire clean")
     return rc
