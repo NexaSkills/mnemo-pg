@@ -27,15 +27,23 @@ Fix: rebind those path sources to PG-clean paths —
     tree only; real data connects never used the default anyway)
 
 sqlite_to_pg.py covers every sqlite3.connect door; this module covers the
-two filesystem-path doors that never go through connect(). No-op unless
-the backend is postgres. Idempotent.
+filesystem-path doors that never go through connect(), AND runs a one-off
+startup sweep: any 0-byte mnemosyne.db(-wal/-shm) residue under HOME (from
+before the shims existed, or from unbootstrapped processes) is moved into
+~/.hermes/backups/sqlite-residue-sweep-<date>/ so no sqlite-shaped artifact
+survives; a NON-empty one is a real resurrection and logs loudly instead.
+No-op unless the backend is postgres. Idempotent.
 """
 from __future__ import annotations
 
+import logging
 import os
+import subprocess
 import sys
+import time
 
 _installed = False
+log = logging.getLogger(__name__)
 
 
 def _shared_pg_path() -> str:
@@ -48,6 +56,45 @@ def _default_lock_path() -> str:
     cache = os.environ.get("XDG_CACHE_HOME") or os.path.expanduser("~/.cache")
     schema = os.environ.get("MNEMO_PG_SCHEMA", "default")
     return os.path.join(cache, "mnemo-pg", "locks", schema, "store.pg")
+
+
+def _sweep_residue() -> None:
+    """Move 0-byte mnemosyne.db*/lcm.db* residue under HOME to backups."""
+    home = os.path.expanduser("~")
+    dest = os.path.join(home, ".hermes", "backups",
+                        "sqlite-residue-sweep-" + time.strftime("%Y%m%d"))
+    try:
+        out = subprocess.run(
+            ["find", home, "-maxdepth", "6",
+             "(", "-name", "mnemosyne.db", "-o", "-name", "mnemosyne.db-wal",
+             "-o", "-name", "mnemosyne.db-shm", "-o", "-name", "lcm.db",
+             "-o", "-name", "lcm.db-wal", "-o", "-name", "lcm.db-shm", ")"],
+            capture_output=True, text=True, timeout=20).stdout.split()
+    except Exception:
+        return
+    moved = 0
+    for f in out:
+        if "/backups/" in f or "/staging/" in f or "/state-snapshots/" in f \
+                or "/cache/scratch/" in f or "/workspace/" in f:
+            continue
+        try:
+            sz = os.path.getsize(f)
+        except OSError:
+            continue
+        if sz == 0:
+            try:
+                os.makedirs(dest, exist_ok=True)
+                os.rename(f, os.path.join(
+                    dest, f.replace(os.sep, "_").lstrip("_")))
+                moved += 1
+            except OSError:
+                pass
+        else:
+            log.error("mnemo-pg: LIVE sqlite store found outside PG routing: "
+                      "%s (%d bytes) — resurrection, investigate", f, sz)
+    if moved:
+        log.info("mnemo-pg: swept %d 0-byte sqlite residue file(s) to %s",
+                 moved, dest)
 
 
 def install(provider_cls=None) -> bool:
@@ -91,5 +138,12 @@ def install(provider_cls=None) -> bool:
                 setattr(mod, "_default_db_path", _default_db_path)
             except Exception:
                 pass
+
+    # 3. one-off sweep of pre-shim 0-byte residue
+    try:
+        _sweep_residue()
+    except Exception:
+        pass
+
     _installed = True
     return True
