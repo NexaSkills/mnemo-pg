@@ -1815,6 +1815,25 @@ class Cursor:
             self._conn._begin_if_idle()
         if re.match(r"^\s*(ROLLBACK\s+TO\b|RELEASE\b)", sql_s, re.I):
             self._conn._begin_if_idle()
+        # SQLite's writer-lock BEGINs (IMMEDIATE/EXCLUSIVE/DEFERRED) have
+        # no PG grammar. Map them onto PG's plain BEGIN: single-host PG
+        # serializes writers via row/MVCC locking, so the SQLite locking
+        # step is a no-op semantically. Same-connection Python-side
+        # locks in the core still serialize threads.
+        if re.match(r"^\s*BEGIN\s+(IMMEDIATE|EXCLUSIVE|DEFERRED)\b",
+                    sql_s, re.I):
+            sql_s = re.sub(r"^\s*BEGIN\s+(IMMEDIATE|EXCLUSIVE|DEFERRED)\b",
+                           "BEGIN", sql_s, count=1, flags=re.I)
+            self._conn._begin_if_idle()
+            try:
+                self._ensure().execute(sql_s)
+            except Exception:
+                # nested (already in a tx): SQLite errors here too; leave
+                # the error to surface unchanged.
+                raise
+            self.description = None
+            self.rowcount = -1
+            return self
         # vec0 sqlite_master probe with a BOUND table name: the inline
         # rewrite in _normalize_ddl only sees literal names, so bind-form
         # probes (name=?) must be recognized here.

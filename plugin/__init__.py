@@ -101,6 +101,17 @@ def _bootstrap() -> None:
             sys.path.insert(0, p)
     _shadow_site_packages()
     _append_psycopg_site()
+    try:
+        import _neutralize_legacy
+
+        _neutralize_legacy.neutralize()
+    except BaseException as exc:
+        # The legacy pip provider `mnemosyne_hermes` must never serve agent
+        # tool calls alongside mnemo-pg (G3). Neutralization failures must
+        # not break the boot — the binding sweep is the second line of
+        # defence, but surface it loudly in the log.
+        print(f"[mnemosyne] legacy-provider neutralizer skipped: {exc}",
+              file=sys.stderr)
 
 
 _boot = None
