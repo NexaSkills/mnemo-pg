@@ -78,6 +78,24 @@ def main():
                     if not row:
                         continue
                     notnull, _istype, dflt = row
+                    # The core's runtime SQL is SQLite-shaped: it compares
+                    # flag columns literally (pinned = 0). A PG boolean
+                    # column has no `boolean = integer` operator, so every
+                    # boolean column must be bigint (false->0, true->1).
+                    cur.execute(
+                        "select format_type(a.atttypid, a.atttypmod) "
+                        "from pg_class t "
+                        "join pg_namespace n on n.oid = t.relnamespace "
+                        "  and n.nspname = %s "
+                        "join pg_attribute a on a.attrelid = t.oid "
+                        "  and a.attname = %s and t.relname = %s",
+                        (schema, column, table))
+                    pgtype_row = cur.fetchone()
+                    pgtype = pgtype_row[0] if pgtype_row else None
+                    if pgtype == "boolean" and (table, column) != ("working_memory", "pinned"):
+                        print(f"SKIP {schema}.{table}.{column} "
+                              "boolean (out of pinned scope)")
+                        continue
                     # declare a PG-side default that satisfies BOTH the core
                     # guard (nullable + declared default) and sqlite-proxy
                     # PRAGMA rendering (plain literal for int defaults).
@@ -93,6 +111,24 @@ def main():
                     base = lit.lower()
                     backfill = {"null": "NULL", "false": "false", "true": "true"}.get(
                         base, lit if re.fullmatch(r"[0-9.+-]+|NULL", lit) else f"'{lit}'")
+                    if pgtype == "boolean":
+                        # boolean -> bigint so the core's `pinned = 0` compiles
+                        cur.execute(
+                            sql.SQL("UPDATE {}.{} SET {} = "
+                                    "CASE WHEN {} THEN 1 ELSE 0 END "
+                                    "WHERE {} IS NOT NULL").format(
+                                        sql.Identifier(schema),
+                                        sql.Identifier(table),
+                                        sql.Identifier(column),
+                                        sql.Identifier(column),
+                                        sql.Identifier(column)))
+                        cur.execute(
+                            sql.SQL('ALTER TABLE {}.{} ALTER COLUMN {} '
+                                    "TYPE bigint USING {}::bigint").format(
+                                        sql.Identifier(schema),
+                                        sql.Identifier(table),
+                                        sql.Identifier(column),
+                                        sql.Identifier(column)))
                     cur.execute(
                         sql.SQL('ALTER TABLE {}.{} ALTER COLUMN {} SET DEFAULT {}').format(
                             sql.Identifier(schema), sql.Identifier(table),
