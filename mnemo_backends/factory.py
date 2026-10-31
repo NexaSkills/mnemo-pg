@@ -106,10 +106,64 @@ def schema_for_profile(hermes_home: str | None) -> str:
     return "mnemosyne_default"
 
 
+def _live_profile_home() -> str | None:
+    """Context-local HERMES_HOME from hermes_constants (set by the multiplexer
+    per routed turn via contextvar). os.environ is the LAUNCH home only, so a
+    multiplexed gateway would otherwise route every profile's turns into one
+    schema. Falls back to the process env when Hermes is absent."""
+    try:
+        import hermes_constants  # noqa: PLC0415
+
+        home = hermes_constants.get_hermes_home()
+        if home:
+            return str(home)
+    except Exception:
+        pass
+    return None
+
+
+def assert_pg_conn(beam: object, identity: str = "") -> None:
+    """Fail LOUD unless a beam's live connection is PostgreSQL-backed.
+
+    NO-FALLBACKS directive (Jan, 2026-10-31): memory must only ever run on PG.
+    A sqlite3 connection reaching the core means binding/backstops failed; we
+    raise so provider init degrades to the visible UNAVAILABLE banner instead
+    of silently resurrecting a .db store.
+    """
+    conn = None
+    for attr in ("_conn", "conn", "_beam", "memory", "_memory"):
+        cand = getattr(beam, attr, None)
+        while cand is not None and not hasattr(cand, "execute") and hasattr(cand, "__dict__"):
+            cand = getattr(cand, "_conn", None) or getattr(cand, "conn", None)
+        if cand is not None and hasattr(cand, "execute") and hasattr(cand, "cursor"):
+            conn = cand
+            break
+        conn = None
+    if conn is None:
+        raise RuntimeError(
+            f"mnemo-pg FAIL-LOUD: no DB connection found on memory beam (identity={identity!r}); "
+            "refusing to run memory without a verifiable PG connection")
+    from .native_conn import NativeConn
+
+    target = conn
+    # unwrap one layer of common wrappers (Connection-in-Holder patterns)
+    for attr in ("_conn", "conn"):
+        inner = getattr(target, attr, None)
+        if inner is not None and hasattr(inner, "execute"):
+            target = inner
+            break
+    if isinstance(target, NativeConn):
+        return
+    raise RuntimeError(
+        f"mnemo-pg FAIL-LOUD: memory beam connection is "
+        f"{type(target).__module__}.{type(target).__name__}, not PostgreSQL NativeConn "
+        f"(identity={identity!r}). PG is the ONLY sanctioned store; refusing to serve memory.")
+
+
 def _store_schema(db_path: str | None = None) -> str:
     schema = os.environ.get("MNEMO_PG_SCHEMA")
     if not schema:
-        schema = schema_for_profile(os.environ.get("HERMES_HOME"))
+        schema = schema_for_profile(_live_profile_home() or os.environ.get("HERMES_HOME"))
     s0 = str(db_path or "")
     if "shared" in s0.lower():
         # shared cross-agent surface -> shared schema (override-aware)

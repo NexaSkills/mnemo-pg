@@ -2027,6 +2027,14 @@ class MnemosyneMemoryProvider(HermesPersonaPromptMixin, MemoryProvider):
                 self._beam = BeamMemory(session_id=self._session_id)
                 logger.info("Mnemosyne initialized: session=%s", self._session_id)
 
+            # NO-FALLBACKS directive (Jan, 2026-10-31): a live memory store MUST
+            # be PostgreSQL. Verify the beam's connection really is the PG-backed
+            # NativeConn; a sqlite handle here means the binding/backstops failed
+            # and every subsequent write would land in a resurrected .db file.
+            if self._beam is not None:
+                from mnemo_backends.factory import assert_pg_conn
+                assert_pg_conn(self._beam, getattr(self, "_agent_identity", "") or "")
+
         except Exception as e:
             # C27: capture the exception so system_prompt_block() can render a
             # visible "UNAVAILABLE" banner every turn and handle_tool_call()
@@ -3041,6 +3049,10 @@ class MnemosyneMemoryProvider(HermesPersonaPromptMixin, MemoryProvider):
         shared_path.parent.mkdir(parents=True, exist_ok=True)
         self._shared_surface_path = shared_path
         self._surface_beam = BeamMemory(session_id="hermes_shared_surface", db_path=shared_path)
+        # NO-FALLBACKS directive (Jan, 2026-10-31): shared surface must also be
+        # PG-backed; a sqlite handle here resurrects shared.db silently.
+        from mnemo_backends.factory import assert_pg_conn
+        assert_pg_conn(self._surface_beam, "shared_surface")
         logger.info("Mnemosyne shared surface initialized: db=%s", shared_path)
 
     def _require_surface_beam(self) -> Optional[str]:
