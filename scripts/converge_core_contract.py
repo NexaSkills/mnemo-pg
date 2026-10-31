@@ -43,6 +43,7 @@ SQL_FILES = (
     "core_contract_converge2.sql",    # B: defaults/types the core validates
     "drop_empty_legacy_tables.sql",   # C1: empty legacy tables only
     "drop_empty_public_shadow.sql",   # C2: public must shadow zero app tables
+    "ensure_scalar_minmax.sql",       # D: scalar min/max() in schema space
 )
 
 
