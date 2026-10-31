@@ -100,6 +100,14 @@ log "step 5e: nullable-default shape (pinned NOT-NULL-no-default class, kim 2026
 "$PY" "$REPO/scripts/converge_nullable_default_shape.py" \
   || log "WARN nullable-default shape convergence reported failures"
 
+log "step 5f: pinned boolean twins WITHOUT default (converge 5e skips them; core SQL needs bigint)"
+"$PY" "$REPO/scripts/apply_sql.py" "$REPO/scripts/fix_pinned_boolean_no_default.sql" \
+  || log "WARN pinned boolean fix reported failures"
+
+log "step 5g: timestamp-column shape -> text (btrim(timestamptz) recall crash class)"
+"$PY" "$REPO/scripts/converge_ts_text_shape.py" \
+  || log "WARN ts-text shape convergence reported failures"
+
 log "step 6: live route per profile"
 "$PY" "$REPO/scripts/live_route.py" || log "WARN live_route reported failures above"
 log "step 6b: G1 stale-provider scan (resurrection root cause 2026-10-31)"
