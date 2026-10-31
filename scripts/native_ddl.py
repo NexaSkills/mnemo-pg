@@ -64,7 +64,10 @@ TABLES: list[tuple[str, list[str], list[str]]] = [
         "consolidation_claimed_at timestamptz",
         "recall_count integer NOT NULL DEFAULT 0",
         "last_recalled timestamptz",
-        "pinned boolean NOT NULL DEFAULT false",
+        # bigint, NOT boolean: the vendored core's SQL compares literally
+        # (`pinned = 0`); PG has no boolean=int operator. Declared
+        # INTEGER DEFAULT 0 in beam.py; keep the DDL twin type-faithful.
+        "pinned bigint NOT NULL DEFAULT 0",
         "valid_until timestamptz",
         "superseded_by text",
         "scope text",

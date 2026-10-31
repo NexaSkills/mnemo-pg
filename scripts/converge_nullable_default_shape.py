@@ -123,8 +123,10 @@ def main():
                                         sql.Identifier(column),
                                         sql.Identifier(column)))
                         cur.execute(
+                            # boolean::bigint has no cast — must map values
                             sql.SQL('ALTER TABLE {}.{} ALTER COLUMN {} '
-                                    "TYPE bigint USING {}::bigint").format(
+                                    "TYPE bigint USING CASE WHEN {} THEN 1 "
+                                    "ELSE 0 END").format(
                                         sql.Identifier(schema),
                                         sql.Identifier(table),
                                         sql.Identifier(column),
