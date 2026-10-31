@@ -2234,6 +2234,12 @@ class NativeConn:
         _ensure_max_fn(self._raw, schema)
         _load_contract_columns()
         _ensure_contract_columns(self._raw, schema)
+        from .core_contract import (ensure_core_contract_columns,
+                                    validate_core_contract, _HEALED)
+        ensure_core_contract_columns(self._raw)
+        if schema not in _HEALED:
+            _HEALED.add(schema)
+            validate_core_contract(self._raw)
         if query_only:
             self._raw.execute("SET transaction_read_only = on")
         # durability parity with SQLite WAL + synchronous=FULL

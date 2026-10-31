@@ -79,6 +79,14 @@ for s in $SCHEMAS; do
   "$PY" "$REPO/scripts/provision_schema.py" "$s" >/dev/null 2>&1 || log "WARN re-provision $s failed"
 done
 
+log "step 5c: core-contract shape (NOT NULL/DEFAULT from core guards)"
+"$PY" "$REPO/scripts/converge_core_contract_shape.py" \
+  || log "WARN shape convergence reported failures"
+
+log "step 5d: proof — connect-time heal passes the core guard"
+"$PY" "$REPO/scripts/proof_device_id_heal.py" \
+  || log "WARN device_id heal proof FAILED (init will hit schema mismatch)"
+
 log "step 6: live route per profile"
 "$PY" "$REPO/scripts/live_route.py" || log "WARN live_route reported failures above"
 
