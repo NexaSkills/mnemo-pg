@@ -89,6 +89,8 @@ log "step 5d: proof — connect-time heal passes the core guard"
 
 log "step 6: live route per profile"
 "$PY" "$REPO/scripts/live_route.py" || log "WARN live_route reported failures above"
+log "step 6b: G1 stale-provider scan (resurrection root cause 2026-10-31)"
+"$PY" "$REPO/scripts/scan_stale_providers.py" || log "G1 FAIL: stale mnemosyne provider dirs serveable - quarantine them"
 
 if [ "$RESTART" = "1" ]; then
   log "step 7: restart surfaces (gateway picks up provider via drain-aware path)"
