@@ -42,13 +42,14 @@ from mnemosyne.core.beam import _add_column_if_missing  # noqa: E402
 
 conn = pg_connect()
 row = conn.execute(
-    "select attnotnull from pg_attribute a "
+    "select attnotnull::int from pg_attribute a "
     "join pg_class k on k.oid = a.attrelid "
     "join pg_namespace n on n.oid = k.relnamespace "
     "and n.nspname = current_schema() "
     "where k.relname = 'memory_events' and a.attname = 'device_id'"
 ).fetchone()
-nn = bool(list(row.values())[0]) if row else False
+# adapter rows proxy sqlite rows: index/tuple access only (no .values here)
+nn = bool(tuple(row)[0]) if row else False
 print("notnull after connect-heal:", nn)
 if not nn:
     print("FAIL: connect-time heal did not SET NOT NULL")
