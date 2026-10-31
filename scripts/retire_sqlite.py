@@ -36,8 +36,8 @@ SKIP_TABLES = {"sqlite_sequence"}
 
 
 def find_live():
-    # test seam (same spirit as MNEMO_TRIPWIRE_UNITS): scan a HERMES stand-in
-    # instead of ~/.hermes. Must be an empty dir for a no-op run.
+    # test seam: fake HOME stand-in. Must be EMPTY (only .db files are
+    # archived) so a no-op run can clean it for the next invocation.
     base = pathlib.Path(os.environ.get("MNEMO_RETIRE_HOMES", HERMES))
     out = []
     for p in base.rglob("*.db"):
@@ -46,6 +46,8 @@ def find_live():
             continue
         if "/backups/" in s or "/mnemo-pg/" in s:
             continue
+        if p.stat().st_size == 0:
+            continue   # 0-byte probe artifacts: quarantine_residual_sqlite's job
         out.append(p)
     return sorted(out)
 
@@ -193,7 +195,7 @@ def main():
     svc_text = (PLUGIN_DIR / "ops" / "mnemo-sqlite-tripwire.service").read_text()
     tmr_text = (PLUGIN_DIR / "ops" / "mnemo-sqlite-tripwire.timer").read_text()
     for f, text in ((svc, svc_text), (tmr, tmr_text)):
-        if a.dry_run:
+        if a.dry_run or os.environ.get("MNE_NO_SYSTEMD"):
             print(f"DRY would write {f}")
             continue
         if f.is_symlink() or (f.exists() and f.read_text() != text):
