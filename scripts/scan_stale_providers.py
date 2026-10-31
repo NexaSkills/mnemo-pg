@@ -23,8 +23,8 @@ HOME = Path.home() / ".hermes"
 def digest(p: Path) -> str:
     return hashlib.sha256(str(p.resolve()).encode()).hexdigest()[:16]
 
-def serveable_dirs() -> list[Path]:
-    out = []
+def serveable_dirs() -> tuple[list[Path], list[Path]]:
+    out, dangling = [], []
     roots = [HOME / "plugins"] + [d / "plugins" for d in sorted((HOME / "profiles").glob("*")) if d.is_dir()]
     if os.environ.get("HERMES_ENABLE_PROJECT_PLUGINS"):
         roots.append(Path.cwd() / ".hermes" / "plugins")
@@ -33,15 +33,27 @@ def serveable_dirs() -> list[Path]:
             continue
         for child in sorted(r.iterdir()):
             if child.name in ("mnemosyne", "mnemosyne_hermes") or child.name.startswith("mnemosyne"):
+                # Dangling symlink = provider MISSING (a quarantine without a
+                # re-link), not a stale serveable copy. live_route.py reports
+                # it as SKIP; flagging it here kept G1 green while the whole
+                # host silently served no memory provider (kim 2026-10-31).
+                if child.is_symlink() and not child.exists():
+                    print(f"STALE {child} -> {os.readlink(child)} (DANGLING: "
+                          f"provider missing, not served at all; re-link via "
+                          f"mnemo_update.sh step 2)")
+                    stale.append(str(child))
+                    dangling.append(child)
+                    continue
                 init = child / "__init__.py"
                 if init.exists():
                     out.append(child)
-    return out
+    return out, dangling
 
 def main() -> int:
     want = digest(REPO_PLUGIN)
     stale = []
-    for d in serveable_dirs():
+    serveable, dangling = serveable_dirs()
+    for d in serveable:
         try:
             link = d.resolve()
         except OSError:
@@ -53,6 +65,10 @@ def main() -> int:
             stale.append(str(d))
     if stale:
         print("G1: quarantine the STALE dirs above (they can serve the legacy sqlite provider).")
+        return 1
+    if dangling:
+        print(f"G1: {len(dangling)} DANGLING link(s) above — provider is MISSING "
+              f"(nothing served at that level); re-link via mnemo_update.sh step 2.")
         return 1
     print("G1 clean: every serveable mnemosyne provider dir is the repo plugin.")
     return 0
