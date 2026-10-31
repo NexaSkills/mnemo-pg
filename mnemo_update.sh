@@ -46,7 +46,7 @@ SOURCES=()
 log(){ echo "$LOG_PREFIX $*"; }
 die(){ echo "$LOG_PREFIX FATAL: $*" >&2; exit 1; }
 run(){ if [[ $DRY -eq 1 ]]; then log "DRY: $*"; else "$@"; fi; }
-# systemd no-op seam for sandboxed tests (see scripts/test_entrypoint_f_a.sh):
+# systemd no-op seam for sandboxed tests (see tests/test_entrypoint_root_f_a.sh):
 # with MNE_NO_SYSTEMD=1, systemctl calls are logged instead of executed, so a
 # test deploy can never enable units or restart surfaces.
 sysd(){ if [[ -n "${MNE_NO_SYSTEMD:-}" ]]; then log "DRY(sysd): systemctl $*"; else systemctl "$@"; fi; }
