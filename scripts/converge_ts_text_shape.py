@@ -14,7 +14,21 @@ to_char round-trip so ISO text lands (what the core's own writers use).
 Also fixes audit_log.timestamp double-precision twins (same trim() crash
 class) to text.
 
+Shared-schema policy (F-C, 2026-10-31): mnemosyne_shared is NO LONGER
+excluded. The original exclusion (added in ee92c6a) had no documented
+reason; repo-wide search shows no shared-specific dependency on the
+timestamptz shape (shared is not touched by migrate_sqlite_to_pg, and
+shared_surface_pg/factory treat it as a normal schema). The exclusion was
+also provably ineffective anyway: converge_core_contract_shape.py sweeps
+`nspname like 'mnemosyne_%'` with no exclusion and casts timestamp text->
+timestamp there (the text->timestamp comparison arm), so a fresh provision
+re-flipped shared to timestamptz while 5g "skipped" it. Applying the
+converge here makes shared correct at step 5g; 5c may still re-flip it on
+later runs (tracked as a follow-up on the 5c sweep), which is why the
+shared leg must run LAST. --exclude-schema can restore the old behaviour.
+
 Usage: converge_ts_text_shape.py [--dsn DSN] [--dry-run]
+                                 [--exclude-schema NAME ...]
 """
 import argparse
 import re
@@ -57,6 +71,9 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--dsn", default=DEFAULT_DSN)
     ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--exclude-schema", action="append", default=[],
+                    help="skip this schema (repeatable); restores the "
+                         "pre-F-C behaviour when given mnemosyne_shared")
     args = ap.parse_args()
 
     fixed = 0
@@ -64,9 +81,9 @@ def main() -> int:
         with conn.cursor() as cur:
             cur.execute(
                 "select nspname from pg_namespace "
-                "where nspname like 'mnemosyne!_%%' escape '!' "
-                "and nspname not in ('mnemosyne_shared') order by 1")
-            schemas = [r[0] for r in cur.fetchall()]
+                "where nspname like 'mnemosyne!_%%' escape '!' order by 1")
+            schemas = [r[0] for r in cur.fetchall()
+                       if r[0] not in set(args.exclude_schema)]
             for s in schemas:
                 if not _NAME.match(s):
                     continue

@@ -6,6 +6,14 @@
 #
 # Usage:  mnemo_update.sh [--ref <sha|main>] [--dry-run] [--no-restart]
 #
+# SINGLE SOURCE OF TRUTH: scripts/mnemo_update.sh exec-chains into this script
+# (F-A, 2026-10-31). The old scripts/ copy was a dev-checkout variant with an
+# extra converge leg (step 5g, converge_ts_text_shape) that this pipeline never
+# ran — freshly provisioned schemas came up with timestamp timestamptz and live
+# writes crashed on pg_catalog.btrim(timestamptz) (mybuddy-template). The
+# converge legs now run HERE, after materialize, against $PLUGIN_DIR code, so
+# both invocation paths execute the identical sequence.
+#
 # Rules enforced here (Jan directives):
 #  - Code is ONLY authored on beez + pushed to origin/main. Hosts never edit code.
 #  - Nothing outside ~/.hermes is modified (repo materializes at
@@ -38,6 +46,10 @@ SOURCES=()
 log(){ echo "$LOG_PREFIX $*"; }
 die(){ echo "$LOG_PREFIX FATAL: $*" >&2; exit 1; }
 run(){ if [[ $DRY -eq 1 ]]; then log "DRY: $*"; else "$@"; fi; }
+# systemd no-op seam for sandboxed tests (see scripts/test_entrypoint_f_a.sh):
+# with MNE_NO_SYSTEMD=1, systemctl calls are logged instead of executed, so a
+# test deploy can never enable units or restart surfaces.
+sysd(){ if [[ -n "${MNE_NO_SYSTEMD:-}" ]]; then log "DRY(sysd): systemctl $*"; else systemctl "$@"; fi; }
 
 # ---------------------------------------------------------------- 1. FETCH
 SRC=""
@@ -129,8 +141,8 @@ if [[ -f "$PLUGIN_DIR/ops/mnemo-sqlite-tripwire.service" ]]; then
       run cp -f "$src" "$dst" && log "tripwire unit refreshed: $u"
     fi
   done
-  run systemctl --user daemon-reload
-  run systemctl --user enable --now mnemo-sqlite-tripwire.timer
+  sysd --user daemon-reload
+  sysd --user enable --now mnemo-sqlite-tripwire.timer
   SOURCES+=("tripwire: mnemo-sqlite-tripwire.timer enabled")
 fi
 for d in "$HERMES"/profiles/*/; do
@@ -160,7 +172,7 @@ for unit in "$HERMES"/../.config/systemd/user/hermes-*.service.d/*mnemo-poly*.co
   run mv "$unit" "$unit.retired-$(date +%Y%m%d-%H%M%S)" || true
   SOURCES+=("params: removed $unit (.env is source of truth)")
 done
-run systemctl --user daemon-reload || true
+sysd --user daemon-reload || true
 
 # ------------------------------------------------------- 3.5 PROVISION
 # Ensure a PG schema exists for every profile + shared BEFORE any process
@@ -178,16 +190,49 @@ python3 "$PLUGIN_DIR/scripts/provision_schema.py" "${SCHEMAS[@]}" \
   && SOURCES+=("provision: ${SCHEMAS[*]}") \
   || log "WARN: provision_schema failed for ${SCHEMAS[*]}"
 
+# ------------------------------------------------------- 3.9 CONVERGE
+# F-A (2026-10-31): the converge legs that only the dev-checkout variant
+# (old scripts/mnemo_update.sh) ran now live in THIS pipeline, so a
+# plan-command deploy == the beez dev deploy, DDL-shape-wise. All legs are
+# idempotent and repo-owned (no fleet-host edits). 5g in particular closes
+# the btrim(timestamptz) write-crash class on freshly provisioned schemas.
+log "step 3.9: core-contract convergence (5-5g, was scripts/-only)"
+python3 "$PLUGIN_DIR/scripts/converge_core_contract.py" \
+  || log "WARN: converge_core_contract reported failures"
+for s in "${SCHEMAS[@]}"; do
+  python3 "$PLUGIN_DIR/scripts/canonical_lineage_fix.py" "$s" 2>/dev/null \
+    || log "note: lineage fix reported issues for $s (converge next)"
+done
+python3 "$PLUGIN_DIR/scripts/provision_schema.py" "${SCHEMAS[@]}" >/dev/null 2>&1 \
+  || log "WARN: re-provision failed (converge may have dropped empty tables)"
+python3 "$PLUGIN_DIR/scripts/converge_core_contract_shape.py" \
+  || log "WARN: shape convergence reported failures"
+python3 "$PLUGIN_DIR/scripts/proof_device_id_heal.py" \
+  || log "WARN: device_id heal proof FAILED (init will hit schema mismatch)"
+python3 "$PLUGIN_DIR/scripts/converge_nullable_default_shape.py" \
+  || log "WARN: nullable-default shape convergence reported failures"
+python3 "$PLUGIN_DIR/scripts/apply_sql.py" "$PLUGIN_DIR/scripts/fix_pinned_boolean_no_default.sql" \
+  || log "WARN: pinned boolean fix reported failures"
+python3 "$PLUGIN_DIR/scripts/apply_sql.py" "$PLUGIN_DIR/scripts/fix_episodic_summary_tsv.sql" \
+  || log "WARN: episodic summary_tsv fix reported failures"
+python3 "$PLUGIN_DIR/scripts/converge_ts_text_shape.py" \
+  || log "WARN: ts-text shape convergence reported failures"
+SOURCES+=("converge: 5-5g core-contract + ts-text shape")
+
 # ---------------------------------------------------------- 4. RESTARTS
 SURFACES=()
 if [[ $NORESTART -eq 0 && $DRY -eq 0 ]]; then
-  while read -r svc; do
-    [[ -n "$svc" ]] && SURFACES+=("$svc")
-  done < <(systemctl --user list-units --type=service --state=running --no-legend --plain 'hermes-*' 2>/dev/null | awk '{print $1}')
-  for svc in "${SURFACES[@]}"; do
-    log "restarting $svc"
-    systemctl --user restart "$svc"
-  done
+  if [[ -n "${MNE_NO_SYSTEMD:-}" ]]; then
+    log "DRY(sysd): would discover+restart hermes-* surfaces"
+  else
+    while read -r svc; do
+      [[ -n "$svc" ]] && SURFACES+=("$svc")
+    done < <(systemctl --user list-units --type=service --state=running --no-legend --plain 'hermes-*' 2>/dev/null | awk '{print $1}')
+    for svc in "${SURFACES[@]}"; do
+      log "restarting $svc"
+      systemctl --user restart "$svc"
+    done
+  fi
 fi
 
 # ----------------------------------------------------------- 5. CHECK_ALL
