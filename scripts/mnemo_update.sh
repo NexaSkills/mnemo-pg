@@ -49,6 +49,15 @@ for pdir in "$HOME"/.hermes/profiles/*/; do
 done
 # the legacy pip provider must never serve tool calls alongside mnemo-pg
 "$PY" "$REPO/scripts/quarantine_legacy_plugin.py" || log "WARN quarantine_legacy_plugin failed (continuing)"
+# G3 quarantines legacy dirs but does NOT create bindings; step 2 owns the
+# symlinks, so they must be (re)created AFTER quarantine runs, or G3 leaves
+# the host serving NO provider (kim 2026-10-31 pass-1 incident).
+ln -sfn "$REPO/plugin" "$HOME/.hermes/plugins/mnemosyne"
+for pdir in "$HOME"/.hermes/profiles/*/; do
+  [ -d "$pdir" ] || continue
+  mkdir -p "$pdir/plugins"
+  ln -sfn "$REPO/plugin" "$pdir/plugins/mnemosyne"
+done
 
 log "step 3: provision schemas"
 SCHEMAS="$("$PY" - <<'PY'
