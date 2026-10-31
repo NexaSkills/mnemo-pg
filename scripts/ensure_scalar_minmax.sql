@@ -6,13 +6,15 @@
 -- process); provisioning it here makes fresh AND legacy schemas correct
 -- at rest instead of papering over it at first connect.
 -- CREATE OR REPLACE + no DROP: never touches any real aggregate.
-DO $$
+DO $mmfunc$
 DECLARE s text;
 BEGIN
   FOR s IN SELECT nspname FROM pg_namespace
            WHERE nspname LIKE 'mnemosyne!_%' ESCAPE '!'
   LOOP
     BEGIN
+      -- inner body carries no single quotes -> embed raw; the outer
+      -- EXECUTE string wraps it in one pair (format's %% -> % literal)
       EXECUTE format('CREATE OR REPLACE FUNCTION %I.max('
                      'a double precision, b double precision) '
                      'RETURNS double precision AS $$ SELECT CASE '
@@ -29,4 +31,4 @@ BEGIN
       RAISE NOTICE 'scalar min/max skipped for %: %', s, SQLERRM;
     END;
   END LOOP;
-END $$;
+END $mmfunc$;
