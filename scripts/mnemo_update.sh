@@ -96,10 +96,23 @@ log "step 5d: proof — connect-time heal passes the core guard"
 "$PY" "$REPO/scripts/proof_device_id_heal.py" \
   || log "WARN device_id heal proof FAILED (init will hit schema mismatch)"
 
+log "step 5e: nullable-default shape (pinned NOT-NULL-no-default class, kim 2026-10-31)"
+"$PY" "$REPO/scripts/converge_nullable_default_shape.py" \
+  || log "WARN nullable-default shape convergence reported failures"
+
 log "step 6: live route per profile"
 "$PY" "$REPO/scripts/live_route.py" || log "WARN live_route reported failures above"
 log "step 6b: G1 stale-provider scan (resurrection root cause 2026-10-31)"
 "$PY" "$REPO/scripts/scan_stale_providers.py" || log "G1 FAIL: stale mnemosyne provider dirs serveable - quarantine them"
+log "step 6c: live-init probe per profile (real provider init -> NativeConn)"
+for pdir in "$HOME"/.hermes/profiles/*/; do
+  [ -d "$pdir" ] || continue
+  p="$(basename "$pdir")"
+  case "$p" in *.deleted.*) continue ;; esac
+  out="$(MNEMO_BACKEND=postgres "$PY" "$REPO/scripts/init_probe.py" "$p" 2>/dev/null | grep '^INIT' || true)"
+  echo "  $out"
+  case "$out" in *": ok"*) ;; *) log "PROBE FAIL $p (init did not reach NativeConn)" ;; esac
+done
 
 if [ "$RESTART" = "1" ]; then
   log "step 7: restart surfaces (gateway picks up provider via drain-aware path)"
