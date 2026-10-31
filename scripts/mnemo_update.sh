@@ -104,6 +104,10 @@ log "step 5f: pinned boolean twins WITHOUT default (converge 5e skips them; core
 "$PY" "$REPO/scripts/apply_sql.py" "$REPO/scripts/fix_pinned_boolean_no_default.sql" \
   || log "WARN pinned boolean fix reported failures"
 
+log "step 5f2: episodic_memory summary/summary_tsv drift (INSERT trigger crash class)"
+"$PY" "$REPO/scripts/apply_sql.py" "$REPO/scripts/fix_episodic_summary_tsv.sql" \
+  || log "WARN episodic summary_tsv fix reported failures"
+
 log "step 5g: timestamp-column shape -> text (btrim(timestamptz) recall crash class)"
 "$PY" "$REPO/scripts/converge_ts_text_shape.py" \
   || log "WARN ts-text shape convergence reported failures"
