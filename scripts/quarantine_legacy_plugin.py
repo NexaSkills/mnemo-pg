@@ -29,6 +29,15 @@ import sys
 HERMES = pathlib.Path.home() / ".hermes"
 REPO = pathlib.Path(os.environ.get("MNEMO_REPO",
                                    HERMES / "plugins" / "mnemo-pg")).resolve()
+# When run from inside a checkout (mnemo_update.sh sets REPO but not
+# MNEMO_REPO), the repo plugin is scripts/../plugin — the default
+# ~/.hermes/plugins/mnemo-pg almost never exists, and an unrealised REPO made
+# every correct symlink look LEGACY (kim quarantine-war 2026-10-31: links
+# quarantined after each re-link, host left serving NO provider).
+if not REPO.exists():
+    _sibling = pathlib.Path(__file__).resolve().parent.parent / "plugin"
+    if _sibling.is_dir():
+        REPO = _sibling
 
 
 def _is_repo_binding(d: pathlib.Path) -> bool:
@@ -38,6 +47,14 @@ def _is_repo_binding(d: pathlib.Path) -> bool:
         return False
     if REPO in real.parents or real == REPO:
         return True
+    # fallback: link whose realpath IS this checkout's plugin dir (the
+    # MNEMO_REPO default may simply be wrong on this host)
+    try:
+        _here_plugin = pathlib.Path(__file__).resolve().parent.parent / "plugin"
+        if real == _here_plugin.resolve():
+            return True
+    except OSError:
+        pass
     # materialized dir copy (binding.py) also counts
     return (d / "mnemo_pg_shim.py").is_file()
 
